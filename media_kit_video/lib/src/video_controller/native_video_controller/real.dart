@@ -235,6 +235,53 @@ class NativeVideoController extends PlatformVideoController {
     }
   }
 
+  Map<String, String> _pictureInPictureArguments(int handle) => {
+    'handle': handle.toString(),
+  };
+
+  @override
+  Future<bool> isPictureInPictureSupported() async {
+    if (!Platform.isIOS) return false;
+    final handle = await player.handle;
+    return await _channel.invokeMethod<bool>(
+          'VideoOutputManager.PictureInPicture.IsSupported',
+          _pictureInPictureArguments(handle),
+        ) ??
+        false;
+  }
+
+  @override
+  Future<bool> isPictureInPictureActive() async {
+    if (!Platform.isIOS) return false;
+    final handle = await player.handle;
+    return await _channel.invokeMethod<bool>(
+          'VideoOutputManager.PictureInPicture.IsActive',
+          _pictureInPictureArguments(handle),
+        ) ??
+        false;
+  }
+
+  @override
+  Future<bool> startPictureInPicture() async {
+    if (!Platform.isIOS) return false;
+    final handle = await player.handle;
+    return await _channel.invokeMethod<bool>(
+          'VideoOutputManager.PictureInPicture.Start',
+          _pictureInPictureArguments(handle),
+        ) ??
+        false;
+  }
+
+  @override
+  Future<void> stopPictureInPicture() async {
+    if (!Platform.isIOS) return;
+    final handle = await player.handle;
+    await _channel.invokeMethod<void>(
+      'VideoOutputManager.PictureInPicture.Stop',
+      _pictureInPictureArguments(handle),
+    );
+  }
+
   /// Disposes the instance. Releases allocated resources back to the system.
   Future<void> _dispose() async {
     super.dispose();

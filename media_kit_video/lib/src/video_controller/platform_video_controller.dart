@@ -51,6 +51,18 @@ abstract class PlatformVideoController {
     int? height,
   });
 
+  /// Whether system Picture in Picture is available for this output.
+  Future<bool> isPictureInPictureSupported() async => false;
+
+  /// Whether system Picture in Picture is currently active.
+  Future<bool> isPictureInPictureActive() async => false;
+
+  /// Starts system Picture in Picture and returns whether it started.
+  Future<bool> startPictureInPicture() async => false;
+
+  /// Stops system Picture in Picture.
+  Future<void> stopPictureInPicture() async {}
+
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered =>
       waitUntilFirstFrameRenderedCompleter.future;

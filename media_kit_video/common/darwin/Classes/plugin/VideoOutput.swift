@@ -39,6 +39,10 @@ public class VideoOutput: NSObject {
   private var currentSize: CGSize = CGSize.zero
   private var disposed: Bool = false
 
+  #if os(iOS)
+    private var pictureInPicture: MediaKitPictureInPictureController?
+  #endif
+
   init(
     handle: Int64,
     configuration: VideoOutputConfiguration,
@@ -56,6 +60,23 @@ public class VideoOutput: NSObject {
     self.textureUpdateCallback = textureUpdateCallback
 
     super.init()
+
+    #if os(iOS)
+      pictureInPicture = MediaKitPictureInPictureController(
+        handle: self.handle,
+        activeChanged: { [weak self] active in
+          guard let self else { return }
+          if active {
+            (self.texture as? SafeResizableTexture)?.requestFlutterTextureOutputFreeze()
+          } else {
+            (self.texture as? SafeResizableTexture)?.resumeFlutterTextureOutput()
+            DispatchQueue.main.async {
+              self.registry.textureFrameAvailable(self.textureId)
+            }
+          }
+        }
+      )
+    #endif
 
     worker.enqueue {
       self._init()
@@ -173,12 +194,61 @@ public class VideoOutput: NSObject {
     }
 
     texture.render(size)
-    DispatchQueue.main.sync { [weak self] in
-      guard let that = self else { return }
-      // Textures must be marked as available from the main thread
-      that.registry.textureFrameAvailable(that.textureId)
+
+    var shouldNotifyFlutter = true
+    #if os(iOS)
+      // Keep the latest frame ready and feed PiP without another copy.
+      let safeTexture = texture as? SafeResizableTexture
+      if let frame = safeTexture?.copyPixelBufferForPictureInPicture()?
+        .takeRetainedValue()
+      {
+        pictureInPicture?.enqueue(frame)
+      }
+      let didFreezeFlutterTexture =
+        safeTexture?.freezeFlutterTextureOutputIfRequested() == true
+      shouldNotifyFlutter = safeTexture?.suppressFlutterTextureUpdates != true
+
+      if didFreezeFlutterTexture {
+        // Publish the next copied frame; later frames stay exclusive to PiP.
+        DispatchQueue.main.async { [weak self] in
+          guard let self else { return }
+          self.registry.textureFrameAvailable(self.textureId)
+        }
+      }
+    #endif
+
+    if shouldNotifyFlutter {
+      DispatchQueue.main.sync { [weak self] in
+        guard let that = self else { return }
+        // Textures must be marked as available from the main thread
+        that.registry.textureFrameAvailable(that.textureId)
+      }
     }
   }
+
+  #if os(iOS)
+    public func isPictureInPictureSupported() -> Bool {
+      pictureInPicture?.isSupported ?? false
+    }
+
+    public func isPictureInPictureActive() -> Bool {
+      pictureInPicture?.isActive ?? false
+    }
+
+    public func startPictureInPicture(
+      completion: @escaping (Bool, String?) -> Void
+    ) {
+      guard let pictureInPicture else {
+        completion(false, "Picture in Picture is unavailable.")
+        return
+      }
+      pictureInPicture.start(completion: completion)
+    }
+
+    public func stopPictureInPicture() {
+      pictureInPicture?.stop()
+    }
+  #endif
 
     private var videoSize: CGSize {
         // fixed size

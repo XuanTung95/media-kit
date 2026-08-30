@@ -26,6 +26,7 @@ Pod::Spec.new do |s|
   s.platform         = :ios, '9.0'
   s.swift_version    = '5.0'
   s.dependency         'Flutter'
+  s.frameworks         = 'AVFoundation', 'AVKit'
   s.resource_bundles = {
     'media_kit_video_privacy' => ['media_kit_video/Sources/media_kit_video/PrivacyInfo.xcprivacy']
   }

@@ -156,6 +156,30 @@ class VideoController {
     );
   }
 
+  /// Whether system Picture in Picture is available for this output.
+  Future<bool> isPictureInPictureSupported() async {
+    final instance = await platform.future;
+    return instance.isPictureInPictureSupported();
+  }
+
+  /// Whether system Picture in Picture is currently active.
+  Future<bool> isPictureInPictureActive() async {
+    final instance = await platform.future;
+    return instance.isPictureInPictureActive();
+  }
+
+  /// Starts system Picture in Picture and returns whether it started.
+  Future<bool> startPictureInPicture() async {
+    final instance = await platform.future;
+    return instance.startPictureInPicture();
+  }
+
+  /// Stops system Picture in Picture.
+  Future<void> stopPictureInPicture() async {
+    final instance = await platform.future;
+    return instance.stopPictureInPicture();
+  }
+
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered async {
     final instance = await platform.future;

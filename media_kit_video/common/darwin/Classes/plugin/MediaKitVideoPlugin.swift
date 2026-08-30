@@ -57,6 +57,16 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       handleSetSizeMethodCall(call.arguments, result)
     case "VideoOutputManager.Dispose":
       handleDisposeMethodCall(call.arguments, result)
+    #if os(iOS)
+      case "VideoOutputManager.PictureInPicture.IsSupported":
+        handlePictureInPictureIsSupported(call.arguments, result)
+      case "VideoOutputManager.PictureInPicture.IsActive":
+        handlePictureInPictureIsActive(call.arguments, result)
+      case "VideoOutputManager.PictureInPicture.Start":
+        handlePictureInPictureStart(call.arguments, result)
+      case "VideoOutputManager.PictureInPicture.Stop":
+        handlePictureInPictureStop(call.arguments, result)
+    #endif
     case "Utils.EnterNativeFullscreen":
       handleEnterNativeFullscreenMethodCall(call.arguments, result)
     case "Utils.ExitNativeFullscreen":
@@ -65,6 +75,64 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       result(FlutterMethodNotImplemented)
     }
   }
+
+  #if os(iOS)
+    private func pictureInPictureHandle(_ arguments: Any?) -> Int64? {
+      let args = arguments as? [String: Any]
+      return Int64(args?["handle"] as? String ?? "")
+    }
+
+    private func handlePictureInPictureIsSupported(
+      _ arguments: Any?,
+      _ result: FlutterResult
+    ) {
+      guard let handle = pictureInPictureHandle(arguments) else {
+        result(FlutterError(code: "invalid_handle", message: nil, details: nil))
+        return
+      }
+      result(videoOutputManager.isPictureInPictureSupported(handle: handle))
+    }
+
+    private func handlePictureInPictureIsActive(
+      _ arguments: Any?,
+      _ result: FlutterResult
+    ) {
+      guard let handle = pictureInPictureHandle(arguments) else {
+        result(FlutterError(code: "invalid_handle", message: nil, details: nil))
+        return
+      }
+      result(videoOutputManager.isPictureInPictureActive(handle: handle))
+    }
+
+    private func handlePictureInPictureStart(
+      _ arguments: Any?,
+      _ result: @escaping FlutterResult
+    ) {
+      guard let handle = pictureInPictureHandle(arguments) else {
+        result(FlutterError(code: "invalid_handle", message: nil, details: nil))
+        return
+      }
+      videoOutputManager.startPictureInPicture(handle: handle) { started, error in
+        if let error {
+          result(FlutterError(code: "pip_unavailable", message: error, details: nil))
+        } else {
+          result(started)
+        }
+      }
+    }
+
+    private func handlePictureInPictureStop(
+      _ arguments: Any?,
+      _ result: FlutterResult
+    ) {
+      guard let handle = pictureInPictureHandle(arguments) else {
+        result(FlutterError(code: "invalid_handle", message: nil, details: nil))
+        return
+      }
+      videoOutputManager.stopPictureInPicture(handle: handle)
+      result(nil)
+    }
+  #endif
 
   private func handleCreateMethodCall(
     _ arguments: Any?,
