@@ -27,6 +27,12 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
   final _videoControllers = HashMap<int, VideoController>();
   final _streamControllers = HashMap<int, StreamController<VideoEvent>>();
   final _streamSubscriptions = HashMap<int, List<StreamSubscription>>();
+  int? _pictureInPictureTextureId;
+  int? _activePictureInPictureTextureId;
+  int? _startingPictureInPictureTextureId;
+  bool _pictureInPictureEnabled = false;
+  bool _pictureInPictureHandoffPending = false;
+  Future<void> _pictureInPictureStopFuture = Future<void>.value();
 
   /// Registers this class as the default instance of [VideoPlayerPlatform].
   static void registerWith() {
@@ -38,7 +44,9 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
   /// This method is called when the plugin is first initialized and on every full restart.
   @override
   Future<void> init() async {
-    for (final textureId in _players.keys) {
+    _pictureInPictureEnabled = false;
+    _pictureInPictureHandoffPending = false;
+    for (final textureId in _players.keys.toList()) {
       await dispose(textureId);
     }
 
@@ -46,11 +54,28 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
     _videoControllers.clear();
     _streamControllers.clear();
     _streamSubscriptions.clear();
+    _pictureInPictureTextureId = null;
+    _activePictureInPictureTextureId = null;
+    _startingPictureInPictureTextureId = null;
+    _pictureInPictureStopFuture = Future<void>.value();
   }
 
   /// Clears one video.
   @override
   Future<void> dispose(int textureId) async {
+    final videoController = _videoControllers[textureId];
+    if ((_activePictureInPictureTextureId == textureId ||
+            _startingPictureInPictureTextureId == textureId) &&
+        videoController != null) {
+      final stopFuture = _preparePictureInPictureHandoff(
+        textureId,
+        videoController,
+        wasStarting: _startingPictureInPictureTextureId == textureId,
+      );
+      _pictureInPictureStopFuture = stopFuture;
+      await stopFuture;
+    }
+
     await _players[textureId]?.dispose();
 
     await _streamControllers[textureId]?.close();
@@ -62,11 +87,27 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
     _videoControllers.remove(textureId);
     _streamControllers.remove(textureId);
     _streamSubscriptions.remove(textureId);
+    if (_activePictureInPictureTextureId == textureId) {
+      _activePictureInPictureTextureId = null;
+    }
+    if (_startingPictureInPictureTextureId == textureId) {
+      _startingPictureInPictureTextureId = null;
+    }
+    if (_pictureInPictureTextureId == textureId) {
+      _pictureInPictureTextureId = null;
+    }
   }
 
   /// Creates an instance of a video player and returns its textureId.
   @override
   Future<int?> create(DataSource dataSource) async {
+    final isMainPlayer = _isMainPlayer(dataSource);
+    if (isMainPlayer) {
+      // The app does not await disposal of the previous VideoPlayerController.
+      // Wait here so AVKit never owns two active PiP controllers at once.
+      await _pictureInPictureStopFuture;
+    }
+
     final player = Player();
     final completer = Completer();
     final videoController = VideoController(player);
@@ -81,6 +122,9 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
     _videoControllers[textureId] = videoController;
     _streamControllers[textureId] = streamController;
     _streamSubscriptions[textureId] = streamSubscriptions;
+    if (isMainPlayer) {
+      _pictureInPictureTextureId = textureId;
+    }
 
     // --------------------------------------------------
     _initialize(textureId);
@@ -117,6 +161,12 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
       ),
       play: false,
     );
+
+    if (isMainPlayer &&
+        _pictureInPictureEnabled &&
+        _pictureInPictureHandoffPending) {
+      unawaited(_resumePictureInPicture(textureId, videoController));
+    }
 
     return textureId;
   }
@@ -197,10 +247,180 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
   @override
   Future<void> setMixWithOthers(bool mixWithOthers) => Future.value();
 
+  /// media_kit's Flutter view already opts out of lifecycle-driven pausing.
+  @override
+  Future<void> setAllowBackgroundPlayback(bool allowBackgroundPlayback) =>
+      Future.value();
+
+  Future<int> enablePictureInPicture(
+    String command,
+    Map<String?, Object?>? data,
+  ) async {
+    final textureId = _pictureInPictureTextureId;
+    final controller = textureId == null ? null : _videoControllers[textureId];
+
+    switch (command) {
+      case 'enable':
+        final activeTextureId = await _findActivePictureInPictureTextureId();
+        if (activeTextureId != null ||
+            _startingPictureInPictureTextureId != null ||
+            _pictureInPictureHandoffPending) {
+          await _disablePictureInPicture(
+            activeTextureId ?? _startingPictureInPictureTextureId,
+          );
+          return 1;
+        }
+        if (controller == null) {
+          return 0;
+        }
+        if (!await controller.isPictureInPictureSupported()) {
+          return 0;
+        }
+        _pictureInPictureEnabled = true;
+        _startingPictureInPictureTextureId = textureId;
+        final started = await controller.startPictureInPicture();
+        if (_startingPictureInPictureTextureId == textureId) {
+          _startingPictureInPictureTextureId = null;
+        }
+        if (started && _pictureInPictureEnabled) {
+          _activePictureInPictureTextureId = textureId;
+          return 1;
+        }
+        if (started) {
+          await controller.stopPictureInPicture();
+        }
+        _pictureInPictureEnabled = false;
+        return 0;
+      case 'disable':
+        await _disablePictureInPicture(
+          await _findActivePictureInPictureTextureId(),
+        );
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+  Future<void> _preparePictureInPictureHandoff(
+      int textureId, VideoController controller,
+      {required bool wasStarting}) async {
+    final active = await controller.isPictureInPictureActive();
+    _activePictureInPictureTextureId = null;
+    if (_startingPictureInPictureTextureId == textureId) {
+      _startingPictureInPictureTextureId = null;
+    }
+    if (!active && !wasStarting) {
+      _pictureInPictureEnabled = false;
+      _pictureInPictureHandoffPending = false;
+      return;
+    }
+
+    _pictureInPictureHandoffPending = _pictureInPictureEnabled;
+    await controller.stopPictureInPicture();
+  }
+
+  Future<void> _resumePictureInPicture(
+    int textureId,
+    VideoController controller,
+  ) async {
+    try {
+      await controller.waitUntilFirstFrameRendered;
+      if (!_pictureInPictureEnabled ||
+          !_pictureInPictureHandoffPending ||
+          _pictureInPictureTextureId != textureId ||
+          _videoControllers[textureId] != controller) {
+        return;
+      }
+
+      _startingPictureInPictureTextureId = textureId;
+      final started = await controller.startPictureInPicture();
+      if (_startingPictureInPictureTextureId == textureId) {
+        _startingPictureInPictureTextureId = null;
+      }
+      if (_pictureInPictureTextureId != textureId ||
+          _videoControllers[textureId] != controller) {
+        if (started) {
+          await controller.stopPictureInPicture();
+        }
+        return;
+      }
+
+      _pictureInPictureHandoffPending = false;
+      if (started && _pictureInPictureEnabled) {
+        _activePictureInPictureTextureId = textureId;
+      } else {
+        _pictureInPictureEnabled = false;
+        _activePictureInPictureTextureId = null;
+      }
+    } catch (_) {
+      if (_pictureInPictureTextureId == textureId) {
+        _pictureInPictureEnabled = false;
+        _pictureInPictureHandoffPending = false;
+        _activePictureInPictureTextureId = null;
+        _startingPictureInPictureTextureId = null;
+      }
+    }
+  }
+
+  Future<int?> _findActivePictureInPictureTextureId() async {
+    final trackedTextureId = _activePictureInPictureTextureId;
+    if (trackedTextureId != null) {
+      final controller = _videoControllers[trackedTextureId];
+      if (controller != null) {
+        try {
+          if (await controller.isPictureInPictureActive()) {
+            return trackedTextureId;
+          }
+        } catch (_) {}
+      }
+      _activePictureInPictureTextureId = null;
+    }
+
+    for (final entry in _videoControllers.entries.toList()) {
+      try {
+        if (await entry.value.isPictureInPictureActive()) {
+          _activePictureInPictureTextureId = entry.key;
+          return entry.key;
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Future<void> _disablePictureInPicture(int? activeTextureId) async {
+    _pictureInPictureEnabled = false;
+    _pictureInPictureHandoffPending = false;
+    _activePictureInPictureTextureId = null;
+    _startingPictureInPictureTextureId = null;
+
+    if (activeTextureId == null) {
+      return;
+    }
+    final controller = _videoControllers[activeTextureId];
+    if (controller == null) {
+      return;
+    }
+    final stopFuture = controller.stopPictureInPicture();
+    _pictureInPictureStopFuture = stopFuture;
+    await stopFuture;
+  }
+
   /// Sets additional options on web.
   @override
   Future<void> setWebOptions(int textureId, VideoPlayerWebOptions options) =>
       Future.value();
+
+  bool _isMainPlayer(DataSource dataSource) {
+    // extraOption is supplied by the app's video_player_platform_interface
+    // fork, while the standalone package also remains compatible with the
+    // upstream interface which does not expose that field.
+    try {
+      final extraOption = (dataSource as dynamic).extraOption;
+      return extraOption is Map && extraOption['playerType'] == 'main';
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// Initialize the [Stream]s for a given textureId.
   void _initialize(int textureId) {

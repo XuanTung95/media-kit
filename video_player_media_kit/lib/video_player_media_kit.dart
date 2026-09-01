@@ -5,6 +5,7 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'package:media_kit/media_kit.dart';
 import 'package:universal_platform/universal_platform.dart';
+import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
 import 'package:video_player_media_kit/src/media_kit_video_player.dart';
 
@@ -40,6 +41,15 @@ import 'package:video_player_media_kit/src/media_kit_video_player.dart';
 ///
 /// {@endtemplate}
 class VideoPlayerMediaKit {
+  /// Creates a media_kit platform instance without registering it globally.
+  ///
+  /// This is useful for applications which route different
+  /// package:video_player controllers to different backends concurrently.
+  static VideoPlayerPlatform createPlatform() {
+    MediaKit.ensureInitialized();
+    return MediaKitVideoPlayer();
+  }
+
   /// {@macro video_player_media_kit}
   static void ensureInitialized({
     bool android = false,

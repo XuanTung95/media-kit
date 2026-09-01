@@ -15,13 +15,15 @@ public class VideoOutputManager: NSObject {
   public func create(
     handle: Int64,
     configuration: VideoOutputConfiguration,
-    textureUpdateCallback: @escaping VideoOutput.TextureUpdateCallback
+    textureUpdateCallback: @escaping VideoOutput.TextureUpdateCallback,
+    pictureInPicturePlaybackCallback: @escaping VideoOutput.PictureInPicturePlaybackCallback
   ) {
     let videoOutput = VideoOutput(
       handle: handle,
       configuration: configuration,
       registry: self.registry,
-      textureUpdateCallback: textureUpdateCallback
+      textureUpdateCallback: textureUpdateCallback,
+      pictureInPicturePlaybackCallback: pictureInPicturePlaybackCallback
     )
 
     self.videoOutputs[handle] = videoOutput
@@ -65,17 +67,25 @@ public class VideoOutputManager: NSObject {
 
     public func startPictureInPicture(
       handle: Int64,
+      playing: Bool,
       completion: @escaping (Bool, String?) -> Void
     ) {
       guard let output = videoOutputs[handle] else {
         completion(false, "Video output was not found.")
         return
       }
-      output.startPictureInPicture(completion: completion)
+      output.startPictureInPicture(playing: playing, completion: completion)
     }
 
-    public func stopPictureInPicture(handle: Int64) {
-      videoOutputs[handle]?.stopPictureInPicture()
+    public func stopPictureInPicture(
+      handle: Int64,
+      completion: @escaping () -> Void
+    ) {
+      guard let output = videoOutputs[handle] else {
+        completion()
+        return
+      }
+      output.stopPictureInPicture(completion: completion)
     }
   #endif
 }

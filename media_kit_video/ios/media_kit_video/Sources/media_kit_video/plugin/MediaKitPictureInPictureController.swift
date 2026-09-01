@@ -10,14 +10,20 @@ import UIKit
 final class MediaKitPictureInPictureController {
   private let handle: OpaquePointer
   private let activeChanged: (Bool) -> Void
+  private let playbackChanged: (Bool) -> Void
   private let frameLock = NSLock()
   private var implementation: AnyObject?
   private var latestFrame: CVPixelBuffer?
   private var preparingImplementation = false
 
-  init(handle: OpaquePointer, activeChanged: @escaping (Bool) -> Void) {
+  init(
+    handle: OpaquePointer,
+    activeChanged: @escaping (Bool) -> Void,
+    playbackChanged: @escaping (Bool) -> Void
+  ) {
     self.handle = handle
     self.activeChanged = activeChanged
+    self.playbackChanged = playbackChanged
   }
 
   var isSupported: Bool {
@@ -35,7 +41,10 @@ final class MediaKitPictureInPictureController {
     return implementation.isActive
   }
 
-  func start(completion: @escaping (Bool, String?) -> Void) {
+  func start(
+    playing: Bool,
+    completion: @escaping (Bool, String?) -> Void
+  ) {
     guard isSupported else {
       completion(false, "System Picture in Picture requires iOS 15 or newer.")
       return
@@ -57,18 +66,25 @@ final class MediaKitPictureInPictureController {
         completion(false, "Picture in Picture is not ready.")
         return
       }
-      implementation.start(initialFrame: initialFrame, completion: completion)
+      implementation.start(
+        initialFrame: initialFrame,
+        playing: playing,
+        completion: completion
+      )
     }
   }
 
-  func stop() {
+  func stop(completion: @escaping () -> Void) {
     frameLock.lock()
     let implementation = implementation
     frameLock.unlock()
     guard #available(iOS 15.0, *),
       let implementation = implementation as? MediaKitPictureInPictureImplementation
-    else { return }
-    implementation.stop()
+    else {
+      completion()
+      return
+    }
+    implementation.stop(completion: completion)
   }
 
   func enqueue(_ pixelBuffer: CVPixelBuffer) {
@@ -98,7 +114,8 @@ final class MediaKitPictureInPictureController {
         existingImplementation as? MediaKitPictureInPictureImplementation
         ?? MediaKitPictureInPictureImplementation(
           handle: self.handle,
-          activeChanged: self.activeChanged
+          activeChanged: self.activeChanged,
+          playbackChanged: self.playbackChanged
         )
       self.frameLock.lock()
       self.implementation = implementation
@@ -113,6 +130,7 @@ final class MediaKitPictureInPictureController {
 private final class MediaKitPictureInPictureImplementation: NSObject {
   private let handle: OpaquePointer
   private let activeChanged: (Bool) -> Void
+  private let playbackChanged: (Bool) -> Void
   private let displayLayer = AVSampleBufferDisplayLayer()
   private let frameLock = NSLock()
 
@@ -121,10 +139,16 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
   private var prepared = false
   private var pictureInPictureActive = false
   private var startCompletion: ((Bool, String?) -> Void)?
+  private var stopCompletions: [() -> Void] = []
 
-  init(handle: OpaquePointer, activeChanged: @escaping (Bool) -> Void) {
+  init(
+    handle: OpaquePointer,
+    activeChanged: @escaping (Bool) -> Void,
+    playbackChanged: @escaping (Bool) -> Void
+  ) {
     self.handle = handle
     self.activeChanged = activeChanged
+    self.playbackChanged = playbackChanged
     super.init()
   }
 
@@ -159,6 +183,7 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
 
   func start(
     initialFrame: CVPixelBuffer,
+    playing: Bool,
     completion: @escaping (Bool, String?) -> Void
   ) {
     let action = {
@@ -171,6 +196,10 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
         completion(false, "Picture in Picture is not ready.")
         return
       }
+      // AVKit caches this value when the PiP controls are first displayed.
+      // Seed it from PlayerState and invalidate before starting PiP.
+      self.setBoolProperty("pause", !playing)
+      controller.invalidatePlaybackState()
       if controller.isPictureInPictureActive {
         self.setPictureInPictureActive(true)
         self.activeChanged(true)
@@ -194,10 +223,31 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
     }
   }
 
-  func stop() {
-    DispatchQueue.main.async {
-      self.controller?.stopPictureInPicture()
+  func stop(completion: @escaping () -> Void) {
+    let action = {
+      guard let controller = self.controller,
+        controller.isPictureInPictureActive || self.isActive
+          || self.startCompletion != nil
+      else {
+        completion()
+        return
+      }
+      self.stopCompletions.append(completion)
+      if self.stopCompletions.count == 1 {
+        controller.stopPictureInPicture()
+      }
     }
+    if Thread.isMainThread {
+      action()
+    } else {
+      DispatchQueue.main.async(execute: action)
+    }
+  }
+
+  private func finishStop() {
+    let completions = stopCompletions
+    stopCompletions.removeAll()
+    completions.forEach { $0() }
   }
 
   @discardableResult
@@ -327,7 +377,7 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
 
   private func setBoolProperty(_ name: String, _ value: Bool) {
     var flag: Int32 = value ? 1 : 0
-    mpv_set_property_async(handle, 0, name, MPV_FORMAT_FLAG, &flag)
+    mpv_set_property(handle, name, MPV_FORMAT_FLAG, &flag)
   }
 
   private func setDoubleProperty(_ name: String, _ value: Double) {
@@ -344,7 +394,10 @@ extension MediaKitPictureInPictureImplementation:
     _ pictureInPictureController: AVPictureInPictureController,
     setPlaying playing: Bool
   ) {
+    // Apply immediately for AVKit, then notify Dart so PlayerState stays in sync.
     setBoolProperty("pause", !playing)
+    playbackChanged(playing)
+    pictureInPictureController.invalidatePlaybackState()
   }
 
   func pictureInPictureControllerIsPlaybackPaused(
@@ -390,6 +443,9 @@ extension MediaKitPictureInPictureImplementation: AVPictureInPictureControllerDe
     setPictureInPictureActive(true)
     activeChanged(true)
     finishStart(true, nil)
+    if !stopCompletions.isEmpty {
+      pictureInPictureController.stopPictureInPicture()
+    }
   }
 
   func pictureInPictureController(
@@ -398,6 +454,7 @@ extension MediaKitPictureInPictureImplementation: AVPictureInPictureControllerDe
   ) {
     activeChanged(false)
     finishStart(false, error.localizedDescription)
+    finishStop()
   }
 
   func pictureInPictureControllerDidStopPictureInPicture(
@@ -405,6 +462,7 @@ extension MediaKitPictureInPictureImplementation: AVPictureInPictureControllerDe
   ) {
     setPictureInPictureActive(false)
     activeChanged(false)
+    finishStop()
   }
 
   func pictureInPictureController(

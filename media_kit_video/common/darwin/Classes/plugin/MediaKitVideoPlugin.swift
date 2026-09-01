@@ -82,6 +82,11 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       return Int64(args?["handle"] as? String ?? "")
     }
 
+    private func pictureInPicturePlaying(_ arguments: Any?) -> Bool {
+      let args = arguments as? [String: Any]
+      return args?["playing"] as? Bool ?? false
+    }
+
     private func handlePictureInPictureIsSupported(
       _ arguments: Any?,
       _ result: FlutterResult
@@ -112,7 +117,11 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
         result(FlutterError(code: "invalid_handle", message: nil, details: nil))
         return
       }
-      videoOutputManager.startPictureInPicture(handle: handle) { started, error in
+      let playing = pictureInPicturePlaying(arguments)
+      videoOutputManager.startPictureInPicture(
+        handle: handle,
+        playing: playing
+      ) { started, error in
         if let error {
           result(FlutterError(code: "pip_unavailable", message: error, details: nil))
         } else {
@@ -123,14 +132,15 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
 
     private func handlePictureInPictureStop(
       _ arguments: Any?,
-      _ result: FlutterResult
+      _ result: @escaping FlutterResult
     ) {
       guard let handle = pictureInPictureHandle(arguments) else {
         result(FlutterError(code: "invalid_handle", message: nil, details: nil))
         return
       }
-      videoOutputManager.stopPictureInPicture(handle: handle)
-      result(nil)
+      videoOutputManager.stopPictureInPicture(handle: handle) {
+        result(nil)
+      }
     }
   #endif
 
@@ -161,6 +171,15 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
               "width": size.width,
               "height": size.height,
             ],
+          ] as [String: Any]
+        )
+      },
+      pictureInPicturePlaybackCallback: { playing in
+        self.channel.invokeMethod(
+          "VideoOutput.PictureInPicture.SetPlaying",
+          arguments: [
+            "handle": handle!,
+            "playing": playing,
           ] as [String: Any]
         )
       }

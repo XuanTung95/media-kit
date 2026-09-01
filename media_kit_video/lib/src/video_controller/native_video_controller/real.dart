@@ -235,9 +235,9 @@ class NativeVideoController extends PlatformVideoController {
     }
   }
 
-  Map<String, String> _pictureInPictureArguments(int handle) => {
-    'handle': handle.toString(),
-  };
+  Map<String, Object> _pictureInPictureArguments(int handle) => {
+        'handle': handle.toString(),
+      };
 
   @override
   Future<bool> isPictureInPictureSupported() async {
@@ -265,9 +265,11 @@ class NativeVideoController extends PlatformVideoController {
   Future<bool> startPictureInPicture() async {
     if (!Platform.isIOS) return false;
     final handle = await player.handle;
+    final arguments = _pictureInPictureArguments(handle)
+      ..['playing'] = player.state.playing;
     return await _channel.invokeMethod<bool>(
           'VideoOutputManager.PictureInPicture.Start',
-          _pictureInPictureArguments(handle),
+          arguments,
         ) ??
         false;
   }
@@ -309,6 +311,22 @@ class NativeVideoController extends PlatformVideoController {
               debugPrint(call.method.toString());
               debugPrint(call.arguments.toString());
               switch (call.method) {
+                case 'VideoOutput.PictureInPicture.SetPlaying':
+                  {
+                    // Keep media_kit's public state and streams synchronized
+                    // with playback commands coming from the iOS PiP controls.
+                    final int handle = call.arguments['handle'];
+                    final bool playing = call.arguments['playing'] == true;
+                    final controller = _controllers[handle];
+                    if (controller != null) {
+                      if (playing) {
+                        await controller.player.play();
+                      } else {
+                        await controller.player.pause();
+                      }
+                    }
+                    break;
+                  }
                 case 'VideoOutput.Resize':
                   {
                     // Notify about updated texture ID & [Rect].

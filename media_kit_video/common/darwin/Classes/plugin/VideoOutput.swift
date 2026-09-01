@@ -16,6 +16,7 @@ import Foundation
 public class VideoOutput: NSObject {
   // Will be called on the main thread
   public typealias TextureUpdateCallback = (Int64, CGSize) -> Void
+  public typealias PictureInPicturePlaybackCallback = (Bool) -> Void
 
   private static let isSimulator: Bool = {
     let isSim: Bool
@@ -47,7 +48,8 @@ public class VideoOutput: NSObject {
     handle: Int64,
     configuration: VideoOutputConfiguration,
     registry: FlutterTextureRegistry,
-    textureUpdateCallback: @escaping TextureUpdateCallback
+    textureUpdateCallback: @escaping TextureUpdateCallback,
+    pictureInPicturePlaybackCallback: @escaping PictureInPicturePlaybackCallback
   ) {
     let handle = OpaquePointer(bitPattern: Int(handle))
     assert(handle != nil, "handle casting")
@@ -74,7 +76,8 @@ public class VideoOutput: NSObject {
               self.registry.textureFrameAvailable(self.textureId)
             }
           }
-        }
+        },
+        playbackChanged: pictureInPicturePlaybackCallback
       )
     #endif
 
@@ -236,17 +239,22 @@ public class VideoOutput: NSObject {
     }
 
     public func startPictureInPicture(
+      playing: Bool,
       completion: @escaping (Bool, String?) -> Void
     ) {
       guard let pictureInPicture else {
         completion(false, "Picture in Picture is unavailable.")
         return
       }
-      pictureInPicture.start(completion: completion)
+      pictureInPicture.start(playing: playing, completion: completion)
     }
 
-    public func stopPictureInPicture() {
-      pictureInPicture?.stop()
+    public func stopPictureInPicture(completion: @escaping () -> Void) {
+      guard let pictureInPicture else {
+        completion()
+        return
+      }
+      pictureInPicture.stop(completion: completion)
     }
   #endif
 
