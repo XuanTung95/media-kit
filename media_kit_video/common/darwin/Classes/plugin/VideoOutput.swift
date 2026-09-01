@@ -256,6 +256,10 @@ public class VideoOutput: NSObject {
       }
       pictureInPicture.stop(completion: completion)
     }
+
+    public func updatePictureInPicturePlaying(_ playing: Bool) {
+      pictureInPicture?.updatePlaying(playing)
+    }
   #endif
 
     private var videoSize: CGSize {

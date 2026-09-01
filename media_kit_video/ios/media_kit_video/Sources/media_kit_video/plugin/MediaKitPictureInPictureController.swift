@@ -87,6 +87,16 @@ final class MediaKitPictureInPictureController {
     implementation.stop(completion: completion)
   }
 
+  func updatePlaying(_ playing: Bool) {
+    frameLock.lock()
+    let implementation = implementation
+    frameLock.unlock()
+    guard #available(iOS 15.0, *),
+      let implementation = implementation as? MediaKitPictureInPictureImplementation
+    else { return }
+    implementation.updatePlaying(playing)
+  }
+
   func enqueue(_ pixelBuffer: CVPixelBuffer) {
     frameLock.lock()
     latestFrame = pixelBuffer
@@ -236,6 +246,18 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
       if self.stopCompletions.count == 1 {
         controller.stopPictureInPicture()
       }
+    }
+    if Thread.isMainThread {
+      action()
+    } else {
+      DispatchQueue.main.async(execute: action)
+    }
+  }
+
+  func updatePlaying(_ playing: Bool) {
+    let action = {
+      self.setBoolProperty("pause", !playing)
+      self.controller?.invalidatePlaybackState()
     }
     if Thread.isMainThread {
       action()

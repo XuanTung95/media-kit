@@ -66,6 +66,8 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
         handlePictureInPictureStart(call.arguments, result)
       case "VideoOutputManager.PictureInPicture.Stop":
         handlePictureInPictureStop(call.arguments, result)
+      case "VideoOutputManager.PictureInPicture.UpdatePlaying":
+        handlePictureInPictureUpdatePlaying(call.arguments, result)
     #endif
     case "Utils.EnterNativeFullscreen":
       handleEnterNativeFullscreenMethodCall(call.arguments, result)
@@ -141,6 +143,21 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       videoOutputManager.stopPictureInPicture(handle: handle) {
         result(nil)
       }
+    }
+
+    private func handlePictureInPictureUpdatePlaying(
+      _ arguments: Any?,
+      _ result: FlutterResult
+    ) {
+      guard let handle = pictureInPictureHandle(arguments) else {
+        result(FlutterError(code: "invalid_handle", message: nil, details: nil))
+        return
+      }
+      videoOutputManager.updatePictureInPicturePlaying(
+        handle: handle,
+        playing: pictureInPicturePlaying(arguments)
+      )
+      result(nil)
     }
   #endif
 

@@ -87,5 +87,9 @@ public class VideoOutputManager: NSObject {
       }
       output.stopPictureInPicture(completion: completion)
     }
+
+    public func updatePictureInPicturePlaying(handle: Int64, playing: Bool) {
+      videoOutputs[handle]?.updatePictureInPicturePlaying(playing)
+    }
   #endif
 }

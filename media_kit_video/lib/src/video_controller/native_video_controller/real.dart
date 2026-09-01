@@ -65,6 +65,7 @@ class NativeVideoController extends PlatformVideoController {
 
   /// [StreamSubscription] for listening to video [Rect].
   StreamSubscription<VideoParams>? videoParamsSubscription;
+  StreamSubscription<bool>? pictureInPicturePlayingSubscription;
 
   /// {@macro native_video_controller}
   NativeVideoController._(
@@ -108,6 +109,17 @@ class NativeVideoController extends PlatformVideoController {
         );
       }),
     );
+    if (Platform.isIOS) {
+      pictureInPicturePlayingSubscription = player.stream.playing.listen(
+        (playing) async {
+          final handle = await player.handle;
+          await _channel.invokeMethod<void>(
+            'VideoOutputManager.PictureInPicture.UpdatePlaying',
+            _pictureInPictureArguments(handle)..['playing'] = playing,
+          );
+        },
+      );
+    }
   }
 
   /// {@macro native_video_controller}
@@ -288,6 +300,7 @@ class NativeVideoController extends PlatformVideoController {
   Future<void> _dispose() async {
     super.dispose();
     await videoParamsSubscription?.cancel();
+    await pictureInPicturePlayingSubscription?.cancel();
     final handle = await player.handle;
     _controllers.remove(handle);
     await _channel.invokeMethod(
