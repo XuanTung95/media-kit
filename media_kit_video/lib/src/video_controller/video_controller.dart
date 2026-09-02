@@ -77,9 +77,12 @@ class VideoController {
     player.platform?.isVideoControllerAttached = true;
 
     () async {
-      final completer = Completer();
-      WidgetsBinding.instance.addPostFrameCallback((_) => completer.complete());
-      await completer.future;
+      final lifecycleState = WidgetsBinding.instance.lifecycleState;
+      if (lifecycleState == null || lifecycleState == AppLifecycleState.resumed) {
+        final completer = Completer();
+        WidgetsBinding.instance.addPostFrameCallback((_) => completer.complete());
+        await completer.future;
+      }
 
       try {
         if (NativeVideoController.supported) {
@@ -169,9 +172,9 @@ class VideoController {
   }
 
   /// Starts system Picture in Picture and returns whether it started.
-  Future<bool> startPictureInPicture() async {
+  Future<bool> startPictureInPicture({Rect? sourceRect}) async {
     final instance = await platform.future;
-    return instance.startPictureInPicture();
+    return instance.startPictureInPicture(sourceRect: sourceRect);
   }
 
   /// Stops system Picture in Picture.

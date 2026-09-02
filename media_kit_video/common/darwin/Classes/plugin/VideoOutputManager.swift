@@ -68,13 +68,18 @@ public class VideoOutputManager: NSObject {
     public func startPictureInPicture(
       handle: Int64,
       playing: Bool,
+      sourceRect: CGRect?,
       completion: @escaping (Bool, String?) -> Void
     ) {
       guard let output = videoOutputs[handle] else {
         completion(false, "Video output was not found.")
         return
       }
-      output.startPictureInPicture(playing: playing, completion: completion)
+      output.startPictureInPicture(
+        playing: playing,
+        sourceRect: sourceRect,
+        completion: completion
+      )
     }
 
     public func stopPictureInPicture(

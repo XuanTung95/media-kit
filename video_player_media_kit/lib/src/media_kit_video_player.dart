@@ -30,6 +30,7 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
   int? _pictureInPictureTextureId;
   int? _activePictureInPictureTextureId;
   int? _startingPictureInPictureTextureId;
+  Rect? _pictureInPictureSourceRect;
   bool _pictureInPictureEnabled = false;
   bool _pictureInPictureHandoffPending = false;
   Future<void> _pictureInPictureStopFuture = Future<void>.value();
@@ -57,6 +58,7 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
     _pictureInPictureTextureId = null;
     _activePictureInPictureTextureId = null;
     _startingPictureInPictureTextureId = null;
+    _pictureInPictureSourceRect = null;
     _pictureInPictureStopFuture = Future<void>.value();
   }
 
@@ -108,7 +110,11 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
       await _pictureInPictureStopFuture;
     }
 
-    final player = Player();
+    final player = Player(
+      configuration: const PlayerConfiguration(
+        iosManageAudioSession: false,
+      ),
+    );
     final completer = Completer();
     final videoController = VideoController(player);
     // NOTE: [StreamController] without broadcast buffers events.
@@ -261,6 +267,18 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
 
     switch (command) {
       case 'enable':
+        final left = data?['left'];
+        final top = data?['top'];
+        final width = data?['width'];
+        final height = data?['height'];
+        if (left is num && top is num && width is num && height is num) {
+          _pictureInPictureSourceRect = Rect.fromLTWH(
+            left.toDouble(),
+            top.toDouble(),
+            width.toDouble(),
+            height.toDouble(),
+          );
+        }
         final activeTextureId = await _findActivePictureInPictureTextureId();
         if (activeTextureId != null ||
             _startingPictureInPictureTextureId != null ||
@@ -278,7 +296,9 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
         }
         _pictureInPictureEnabled = true;
         _startingPictureInPictureTextureId = textureId;
-        final started = await controller.startPictureInPicture();
+        final started = await controller.startPictureInPicture(
+          sourceRect: _pictureInPictureSourceRect,
+        );
         if (_startingPictureInPictureTextureId == textureId) {
           _startingPictureInPictureTextureId = null;
         }
@@ -333,7 +353,9 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
       }
 
       _startingPictureInPictureTextureId = textureId;
-      final started = await controller.startPictureInPicture();
+      final started = await controller.startPictureInPicture(
+        sourceRect: _pictureInPictureSourceRect,
+      );
       if (_startingPictureInPictureTextureId == textureId) {
         _startingPictureInPictureTextureId = null;
       }
@@ -392,6 +414,7 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
     _pictureInPictureHandoffPending = false;
     _activePictureInPictureTextureId = null;
     _startingPictureInPictureTextureId = null;
+    _pictureInPictureSourceRect = null;
 
     if (activeTextureId == null) {
       return;

@@ -240,13 +240,18 @@ public class VideoOutput: NSObject {
 
     public func startPictureInPicture(
       playing: Bool,
+      sourceRect: CGRect?,
       completion: @escaping (Bool, String?) -> Void
     ) {
       guard let pictureInPicture else {
         completion(false, "Picture in Picture is unavailable.")
         return
       }
-      pictureInPicture.start(playing: playing, completion: completion)
+      pictureInPicture.start(
+        playing: playing,
+        sourceRect: sourceRect,
+        completion: completion
+      )
     }
 
     public func stopPictureInPicture(completion: @escaping () -> Void) {

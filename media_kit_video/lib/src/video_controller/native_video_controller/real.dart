@@ -274,11 +274,19 @@ class NativeVideoController extends PlatformVideoController {
   }
 
   @override
-  Future<bool> startPictureInPicture() async {
+  Future<bool> startPictureInPicture({Rect? sourceRect}) async {
     if (!Platform.isIOS) return false;
     final handle = await player.handle;
     final arguments = _pictureInPictureArguments(handle)
       ..['playing'] = player.state.playing;
+    if (sourceRect != null) {
+      arguments['sourceRect'] = {
+        'left': sourceRect.left,
+        'top': sourceRect.top,
+        'width': sourceRect.width,
+        'height': sourceRect.height,
+      };
+    }
     return await _channel.invokeMethod<bool>(
           'VideoOutputManager.PictureInPicture.Start',
           arguments,

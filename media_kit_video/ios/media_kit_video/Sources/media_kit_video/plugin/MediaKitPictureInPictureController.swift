@@ -26,6 +26,15 @@ final class MediaKitPictureInPictureController {
     self.playbackChanged = playbackChanged
   }
 
+  deinit {
+    frameLock.lock()
+    let implementation = implementation
+    frameLock.unlock()
+    if #available(iOS 15.0, *) {
+      (implementation as? MediaKitPictureInPictureImplementation)?.dispose()
+    }
+  }
+
   var isSupported: Bool {
     guard #available(iOS 15.0, *) else { return false }
     return AVPictureInPictureController.isPictureInPictureSupported()
@@ -43,6 +52,7 @@ final class MediaKitPictureInPictureController {
 
   func start(
     playing: Bool,
+    sourceRect: CGRect?,
     completion: @escaping (Bool, String?) -> Void
   ) {
     guard isSupported else {
@@ -69,6 +79,7 @@ final class MediaKitPictureInPictureController {
       implementation.start(
         initialFrame: initialFrame,
         playing: playing,
+        sourceRect: sourceRect,
         completion: completion
       )
     }
@@ -194,6 +205,7 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
   func start(
     initialFrame: CVPixelBuffer,
     playing: Bool,
+    sourceRect: CGRect?,
     completion: @escaping (Bool, String?) -> Void
   ) {
     let action = {
@@ -202,6 +214,7 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
         return
       }
       self.prepareIfNeeded()
+      self.updateSourceRect(sourceRect)
       guard let controller = self.controller else {
         completion(false, "Picture in Picture is not ready.")
         return
@@ -303,12 +316,12 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
       frame: CGRect(x: window.bounds.maxX - 2, y: 0, width: 2, height: 2)
     )
     view.isUserInteractionEnabled = false
+    view.isHidden = true
     view.autoresizingMask = [.flexibleLeftMargin, .flexibleBottomMargin]
     displayLayer.frame = view.bounds
     displayLayer.videoGravity = .resizeAspect
     view.layer.addSublayer(displayLayer)
 
-    // A visible source layer is required, so keep a tiny view above Flutter.
     window.addSubview(view)
     sourceView = view
 
@@ -326,9 +339,47 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
     frameLock.unlock()
   }
 
+  private func updateSourceRect(_ sourceRect: CGRect?) {
+    guard let sourceRect, sourceRect.width > 0, sourceRect.height > 0,
+      let sourceView
+    else { return }
+    sourceView.frame = sourceRect
+    displayLayer.frame = sourceView.bounds
+    sourceView.layoutIfNeeded()
+  }
+
+  private func resetSourceView() {
+    guard let sourceView, let window = sourceView.window else { return }
+    sourceView.frame = CGRect(
+      x: window.bounds.maxX - 2,
+      y: 0,
+      width: 2,
+      height: 2
+    )
+    displayLayer.frame = sourceView.bounds
+  }
+
+  func dispose() {
+    let action = {
+      self.controller?.delegate = nil
+      self.controller?.stopPictureInPicture()
+      self.controller = nil
+      self.displayLayer.flushAndRemoveImage()
+      self.sourceView?.removeFromSuperview()
+      self.sourceView = nil
+      self.prepared = false
+    }
+    if Thread.isMainThread {
+      action()
+    } else {
+      DispatchQueue.main.async(execute: action)
+    }
+  }
+
   private func finishStart(_ started: Bool, _ error: String?) {
     if !started {
       setPictureInPictureActive(false)
+      resetSourceView()
     }
     let completion = startCompletion
     startCompletion = nil
@@ -484,6 +535,7 @@ extension MediaKitPictureInPictureImplementation: AVPictureInPictureControllerDe
   ) {
     setPictureInPictureActive(false)
     activeChanged(false)
+    resetSourceView()
     finishStop()
   }
 

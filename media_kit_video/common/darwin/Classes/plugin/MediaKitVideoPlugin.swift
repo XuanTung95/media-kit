@@ -89,6 +89,22 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       return args?["playing"] as? Bool ?? false
     }
 
+    private func pictureInPictureSourceRect(_ arguments: Any?) -> CGRect? {
+      let args = arguments as? [String: Any]
+      let rect = args?["sourceRect"] as? [String: Any]
+      guard let left = rect?["left"] as? NSNumber,
+        let top = rect?["top"] as? NSNumber,
+        let width = rect?["width"] as? NSNumber,
+        let height = rect?["height"] as? NSNumber
+      else { return nil }
+      return CGRect(
+        x: left.doubleValue,
+        y: top.doubleValue,
+        width: width.doubleValue,
+        height: height.doubleValue
+      )
+    }
+
     private func handlePictureInPictureIsSupported(
       _ arguments: Any?,
       _ result: FlutterResult
@@ -122,7 +138,8 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       let playing = pictureInPicturePlaying(arguments)
       videoOutputManager.startPictureInPicture(
         handle: handle,
-        playing: playing
+        playing: playing,
+        sourceRect: pictureInPictureSourceRect(arguments)
       ) { started, error in
         if let error {
           result(FlutterError(code: "pip_unavailable", message: error, details: nil))

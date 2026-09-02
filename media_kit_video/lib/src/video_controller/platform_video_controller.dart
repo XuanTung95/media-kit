@@ -58,7 +58,7 @@ abstract class PlatformVideoController {
   Future<bool> isPictureInPictureActive() async => false;
 
   /// Starts system Picture in Picture and returns whether it started.
-  Future<bool> startPictureInPicture() async => false;
+  Future<bool> startPictureInPicture({Rect? sourceRect}) async => false;
 
   /// Stops system Picture in Picture.
   Future<void> stopPictureInPicture() async {}
