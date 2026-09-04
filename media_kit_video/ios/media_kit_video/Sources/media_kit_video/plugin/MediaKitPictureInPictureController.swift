@@ -316,13 +316,19 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
       frame: CGRect(x: window.bounds.maxX - 2, y: 0, width: 2, height: 2)
     )
     view.isUserInteractionEnabled = false
-    view.isHidden = true
     view.autoresizingMask = [.flexibleLeftMargin, .flexibleBottomMargin]
     displayLayer.frame = view.bounds
     displayLayer.videoGravity = .resizeAspect
     view.layer.addSublayer(displayLayer)
 
-    window.addSubview(view)
+    if let flutterView = window.rootViewController?.view,
+      flutterView.superview === window
+    {
+      window.insertSubview(view, belowSubview: flutterView)
+    } else {
+      window.addSubview(view)
+      window.sendSubviewToBack(view)
+    }
     sourceView = view
 
     let source = AVPictureInPictureController.ContentSource(
