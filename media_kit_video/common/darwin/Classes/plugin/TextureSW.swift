@@ -18,6 +18,7 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
   private let handle: OpaquePointer
   private let updateCallback: UpdateCallback
   private var renderContext: OpaquePointer?
+  private var disposed = false
   private var textureContexts = SwappableObjectManager<TextureSWContext>(
     objects: [],
     skipCheckArgs: true
@@ -38,11 +39,18 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
   }
 
   deinit {
+    dispose()
+  }
+
+  public func dispose() {
+    guard !disposed else { return }
+    disposed = true
     disposePixelBuffer()
     disposeMPV()
   }
 
   public func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
+    guard !disposed else { return nil }
     let textureContext = textureContexts.current
     if textureContext == nil {
       return nil
@@ -52,6 +60,7 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
   }
 
   private func initMPV() {
+    guard !disposed else { return }
     let api = UnsafeMutableRawPointer(
       mutating: (MPV_RENDER_API_TYPE_SW as NSString).utf8String
     )
@@ -77,11 +86,14 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
   }
 
   private func disposeMPV() {
+    guard let renderContext else { return }
     mpv_render_context_set_update_callback(renderContext, nil, nil)
     mpv_render_context_free(renderContext)
+    self.renderContext = nil
   }
 
   public func resize(_ size: CGSize) {
+    guard !disposed else { return }
     if size.width == 0 || size.height == 0 {
       return
     }
@@ -108,6 +120,7 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
   }
 
   public func render(_ size: CGSize) {
+    guard !disposed else { return }
     let textureContext = textureContexts.nextAvailable()
     if textureContext == nil {
       return

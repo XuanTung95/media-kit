@@ -71,6 +71,7 @@ class InitializerIsolate {
           }
           port.send(true);
         } else {
+          _disposeCompleters.remove(handle.address)?.complete();
           receiver.close();
         }
       },
@@ -85,22 +86,27 @@ class InitializerIsolate {
     return handle;
   }
 
-  /// Disposes [Pointer<mpv_handle>].
-  void dispose(generated.MPV mpv, Pointer<generated.mpv_handle> handle) {
+  /// Stops the isolate event loop and waits until it no longer reads [handle].
+  Future<void> prepareDispose(
+    generated.MPV mpv,
+    Pointer<generated.mpv_handle> handle,
+  ) async {
     final port = _ports[handle.address];
     final isolate = _isolates[handle.address];
     if (port != null && isolate != null) {
+      final completer = Completer<void>();
+      _disposeCompleters[handle.address] = completer;
       port.send(null);
-
-      _ports.remove(handle.address);
-      _isolates.remove(handle.address);
-
       mpv.mpv_wakeup(handle);
-
-      Future.delayed(const Duration(seconds: 2), () {
-        isolate.kill(priority: Isolate.immediate);
-      });
+      await completer.future;
     }
+  }
+
+  /// Releases isolate bookkeeping after the native core has terminated.
+  void completeDispose(Pointer<generated.mpv_handle> handle) {
+    _disposeCompleters.remove(handle.address);
+    _ports.remove(handle.address);
+    _isolates.remove(handle.address)?.kill(priority: Isolate.immediate);
   }
 
   static void _mainloop(SendPort port) async {
@@ -169,4 +175,5 @@ class InitializerIsolate {
 
   final _ports = HashMap<int, SendPort>();
   final _isolates = HashMap<int, Isolate>();
+  final _disposeCompleters = HashMap<int, Completer<void>>();
 }

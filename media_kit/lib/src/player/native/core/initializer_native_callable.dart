@@ -56,15 +56,25 @@ class InitializerNativeCallable {
     return ctx;
   }
 
-  /// Disposes [Pointer<mpv_handle>].
-  void dispose(Pointer<generated.mpv_handle> ctx) {
-    _locks.remove(ctx.address);
-    _eventCallbacks.remove(ctx.address);
-
-    // Clear the wakeup callback in libmpv before closing NativeCallable
-    // to prevent libmpv from invoking a deleted callback
+  /// Prevents new callbacks and waits for any callback already in flight.
+  /// The [NativeCallable] must remain alive until the mpv core terminates.
+  Future<void> prepareDispose(Pointer<generated.mpv_handle> ctx) async {
     mpv.mpv_set_wakeup_callback(ctx, nullptr, nullptr);
-    
+
+    final lock = _locks[ctx.address];
+    if (lock != null) {
+      await lock.synchronized(() async {
+        _eventCallbacks.remove(ctx.address);
+      });
+    } else {
+      _eventCallbacks.remove(ctx.address);
+    }
+    _locks.remove(ctx.address);
+  }
+
+  /// Closes the callback after `mpv_terminate_destroy` has joined the core
+  /// thread, so it cannot invoke a released Dart trampoline.
+  void completeDispose(Pointer<generated.mpv_handle> ctx) {
     _wakeUpNativeCallables.remove(ctx.address)?.close();
   }
 

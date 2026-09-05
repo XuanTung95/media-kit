@@ -56,17 +56,39 @@ class Initializer {
     }
   }
 
-  /// Disposes [Pointer<mpv_handle>].
-  void dispose(Pointer<generated.mpv_handle> ctx) {
+  /// Stops event delivery for [ctx] and waits for any in-flight callback.
+  /// Callback resources stay alive until [completeDispose] is called after
+  /// `mpv_terminate_destroy`.
+  Future<void> prepareDispose(Pointer<generated.mpv_handle> ctx) async {
     if (kDebugMode && isMainIsolate()) {
-      InitializerIsolate().dispose(mpv, ctx);
+      await InitializerIsolate().prepareDispose(mpv, ctx);
       return;
     }
     if (!isExecmemRestricted) {
-      InitializerNativeCallable(mpv).dispose(ctx);
+      await InitializerNativeCallable(mpv).prepareDispose(ctx);
     } else {
-      InitializerIsolate().dispose(mpv, ctx);
+      await InitializerIsolate().prepareDispose(mpv, ctx);
     }
+  }
+
+  /// Releases callback resources after the native core has terminated.
+  void completeDispose(Pointer<generated.mpv_handle> ctx) {
+    if (kDebugMode && isMainIsolate()) {
+      InitializerIsolate().completeDispose(ctx);
+      return;
+    }
+    if (!isExecmemRestricted) {
+      InitializerNativeCallable(mpv).completeDispose(ctx);
+    } else {
+      InitializerIsolate().completeDispose(ctx);
+    }
+  }
+
+  /// Backwards-compatible callback cleanup for internal callers that own
+  /// native handle termination themselves.
+  Future<void> dispose(Pointer<generated.mpv_handle> ctx) async {
+    await prepareDispose(ctx);
+    completeDispose(ctx);
   }
 
   bool isMainIsolate() {

@@ -46,14 +46,20 @@ public class VideoOutputManager: NSObject {
   }
 
   public func destroy(
-    handle: Int64
+    handle: Int64,
+    completion: @escaping () -> Void
   ) {
-    let videoOutput = self.videoOutputs[handle]
-    if videoOutput == nil {
+    guard let videoOutput = self.videoOutputs[handle] else {
+      completion()
       return
     }
 
-    self.videoOutputs[handle] = nil
+    videoOutput.dispose { [weak self, weak videoOutput] in
+      if let current = self?.videoOutputs[handle], current === videoOutput {
+        self?.videoOutputs[handle] = nil
+      }
+      completion()
+    }
   }
 
   #if os(iOS)

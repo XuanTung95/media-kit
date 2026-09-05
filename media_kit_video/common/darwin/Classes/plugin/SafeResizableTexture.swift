@@ -14,8 +14,14 @@ public class SafeResizableTexture:
   FlutterTexture,
   ResizableTextureProtocol
 {
+  // `lock` only protects the Flutter/PiP freeze state. Rendering and Flutter's
+  // raster read must remain concurrent because the child uses swappable pixel
+  // buffers specifically for that purpose.
   private let lock = NSRecursiveLock()
+  private let lifecycle = NSCondition()
   private let child: ResizableTextureProtocol
+  private var disposed = false
+  private var activeChildOperations = 0
   public var suppressFlutterTextureUpdates = false
   private var freezeFlutterTextureOutputOnNextFrame = false
   private var frozenFlutterPixelBuffer: CVPixelBuffer?
@@ -25,27 +31,54 @@ public class SafeResizableTexture:
   }
 
   public func resize(_ size: CGSize) {
-    return locked {
-      return child.resize(size)
+    withChildOperation(or: ()) {
+      child.resize(size)
     }
   }
 
   public func render(_ size: CGSize) {
-    return locked {
-      return child.render(size)
+    withChildOperation(or: ()) {
+      child.render(size)
     }
   }
 
   public func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
-    if suppressFlutterTextureUpdates {
-      guard let frozenFlutterPixelBuffer else { return nil }
-      return Unmanaged.passRetained(frozenFlutterPixelBuffer)
+    let outputState: (suppressed: Bool, frozen: CVPixelBuffer?) = locked {
+      (suppressFlutterTextureUpdates, frozenFlutterPixelBuffer)
     }
-    return child.copyPixelBuffer()
+    if outputState.suppressed {
+      guard let frozen = outputState.frozen else { return nil }
+      return Unmanaged.passRetained(frozen)
+    }
+    return withChildOperation(or: nil) {
+      child.copyPixelBuffer()
+    }
   }
 
   public func copyPixelBufferForPictureInPicture() -> Unmanaged<CVPixelBuffer>? {
-    return child.copyPixelBuffer()
+    return withChildOperation(or: nil) {
+      child.copyPixelBuffer()
+    }
+  }
+
+  public func dispose() {
+    lifecycle.lock()
+    guard !disposed else {
+      lifecycle.unlock()
+      return
+    }
+    disposed = true
+    while activeChildOperations > 0 {
+      lifecycle.wait()
+    }
+    lifecycle.unlock()
+
+    locked {
+      freezeFlutterTextureOutputOnNextFrame = false
+      frozenFlutterPixelBuffer = nil
+      suppressFlutterTextureUpdates = true
+    }
+    child.dispose()
   }
 
   public func requestFlutterTextureOutputFreeze() {
@@ -61,7 +94,10 @@ public class SafeResizableTexture:
     return locked {
       guard freezeFlutterTextureOutputOnNextFrame else { return false }
       freezeFlutterTextureOutputOnNextFrame = false
-      guard let source = child.copyPixelBuffer()?.takeRetainedValue(),
+      guard
+        let source = withChildOperation(or: nil, {
+          child.copyPixelBuffer()
+        })?.takeRetainedValue(),
         let frozenFlutterPixelBuffer = copyPixelBuffer(source)
       else { return false }
       self.frozenFlutterPixelBuffer = frozenFlutterPixelBuffer
@@ -123,6 +159,27 @@ public class SafeResizableTexture:
     lock.lock()
     defer {
       lock.unlock()
+    }
+
+    return block()
+  }
+
+  private func withChildOperation<T>(or fallback: T, _ block: () -> T) -> T {
+    lifecycle.lock()
+    guard !disposed else {
+      lifecycle.unlock()
+      return fallback
+    }
+    activeChildOperations += 1
+    lifecycle.unlock()
+
+    defer {
+      lifecycle.lock()
+      activeChildOperations -= 1
+      if activeChildOperations == 0 {
+        lifecycle.broadcast()
+      }
+      lifecycle.unlock()
     }
 
     return block()

@@ -88,9 +88,30 @@ public class VideoOutput: NSObject {
 
   deinit {
     worker.cancel()
+    if !disposed {
+      texture?.dispose()
+      disposeTextureId()
+    }
+  }
 
+  /// Stops rendering and releases the mpv render context before completion.
+  /// The owning mpv core must remain alive until this callback is invoked.
+  public func dispose(completion: @escaping () -> Void) {
+    guard !disposed else {
+      completion()
+      return
+    }
     disposed = true
-    disposeTextureId()
+
+    // Serialize behind any render already queued on the worker. New update
+    // callbacks are ignored once `disposed` is true.
+    worker.enqueue { [self] in
+      texture?.dispose()
+      disposeTextureId { [self] in
+        worker.cancel()
+        completion()
+      }
+    }
   }
 
   public func setSize(width: Int64?, height: Int64?) {
@@ -158,23 +179,32 @@ public class VideoOutput: NSObject {
     textureUpdateCallback(textureId, CGSize(width: 0, height: 0))
   }
 
-  private func disposeTextureId() {
+  private func disposeTextureId(completion: (() -> Void)? = nil) {
     let registry_ = self.registry
     let textureId_ = self.textureId
     textureId = -1
     DispatchQueue.main.async {
       // Textures must be unregistered on the platform thread
-      registry_.unregisterTexture(textureId_)
+      if textureId_ >= 0 {
+        registry_.unregisterTexture(textureId_)
+      }
+      completion?()
     }
   }
 
   public func updateCallback() {
+    if disposed {
+      return
+    }
     worker.enqueue {
       self._updateCallback()
     }
   }
 
   private func _updateCallback() {
+    if disposed {
+      return
+    }
     let size = videoSize
 
     if size.width == 0 || size.height == 0 {

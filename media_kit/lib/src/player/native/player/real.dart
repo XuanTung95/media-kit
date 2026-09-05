@@ -110,11 +110,20 @@ class NativePlayer extends PlatformPlayer {
 
       await super.dispose();
 
-      Initializer(mpv).dispose(ctx);
-
-      Future.delayed(const Duration(seconds: 5), () {
+      // Finish destroying this exact mpv core before dispose returns. A
+      // delayed destroy lets an old iOS player terminate while a newer player
+      // is already running, which can stop the new playback even though its
+      // `pause` property remains false.
+      //
+      // Callback resources are retained until the core thread has joined, so
+      // synchronous termination cannot call an already released trampoline.
+      final initializer = Initializer(mpv);
+      await initializer.prepareDispose(ctx);
+      try {
         mpv.mpv_terminate_destroy(ctx);
-      });
+      } finally {
+        initializer.completeDispose(ctx);
+      }
     }
 
     if (synchronized) {
