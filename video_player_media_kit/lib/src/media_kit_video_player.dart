@@ -267,50 +267,59 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
 
     switch (command) {
       case 'enable':
-        final left = data?['left'];
-        final top = data?['top'];
-        final width = data?['width'];
-        final height = data?['height'];
-        if (left is num && top is num && width is num && height is num) {
-          _pictureInPictureSourceRect = Rect.fromLTWH(
-            left.toDouble(),
-            top.toDouble(),
-            width.toDouble(),
-            height.toDouble(),
+        try {
+          final left = data?['left'];
+          final top = data?['top'];
+          final width = data?['width'];
+          final height = data?['height'];
+          if (left is num && top is num && width is num && height is num) {
+            _pictureInPictureSourceRect = Rect.fromLTWH(
+              left.toDouble(),
+              top.toDouble(),
+              width.toDouble(),
+              height.toDouble(),
+            );
+          }
+          final activeTextureId = await _findActivePictureInPictureTextureId();
+          if (activeTextureId != null ||
+              _startingPictureInPictureTextureId != null ||
+              _pictureInPictureHandoffPending) {
+            await _disablePictureInPicture(
+              activeTextureId ?? _startingPictureInPictureTextureId,
+            );
+            return 1;
+          }
+          if (controller == null) {
+            return -1;
+          }
+          if (!await controller.isPictureInPictureSupported()) {
+            return 0;
+          }
+          _pictureInPictureEnabled = true;
+          _startingPictureInPictureTextureId = textureId;
+          final started = await controller.startPictureInPicture(
+            sourceRect: _pictureInPictureSourceRect,
           );
+          if (_startingPictureInPictureTextureId == textureId) {
+            _startingPictureInPictureTextureId = null;
+          }
+          if (started && _pictureInPictureEnabled) {
+            _activePictureInPictureTextureId = textureId;
+            return 1;
+          }
+          if (started) {
+            await controller.stopPictureInPicture();
+          }
+          _pictureInPictureEnabled = false;
+          return -1;
+        } catch (error, stackTrace) {
+          _pictureInPictureEnabled = false;
+          if (_startingPictureInPictureTextureId == textureId) {
+            _startingPictureInPictureTextureId = null;
+          }
+          debugPrint('Failed to enable picture in picture: $error\n$stackTrace');
+          return -1;
         }
-        final activeTextureId = await _findActivePictureInPictureTextureId();
-        if (activeTextureId != null ||
-            _startingPictureInPictureTextureId != null ||
-            _pictureInPictureHandoffPending) {
-          await _disablePictureInPicture(
-            activeTextureId ?? _startingPictureInPictureTextureId,
-          );
-          return 1;
-        }
-        if (controller == null) {
-          return 0;
-        }
-        if (!await controller.isPictureInPictureSupported()) {
-          return 0;
-        }
-        _pictureInPictureEnabled = true;
-        _startingPictureInPictureTextureId = textureId;
-        final started = await controller.startPictureInPicture(
-          sourceRect: _pictureInPictureSourceRect,
-        );
-        if (_startingPictureInPictureTextureId == textureId) {
-          _startingPictureInPictureTextureId = null;
-        }
-        if (started && _pictureInPictureEnabled) {
-          _activePictureInPictureTextureId = textureId;
-          return 1;
-        }
-        if (started) {
-          await controller.stopPictureInPicture();
-        }
-        _pictureInPictureEnabled = false;
-        return 0;
       case 'disable':
         await _disablePictureInPicture(
           await _findActivePictureInPictureTextureId(),
