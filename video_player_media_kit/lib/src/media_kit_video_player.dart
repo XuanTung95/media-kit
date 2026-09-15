@@ -69,13 +69,11 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
     if ((_activePictureInPictureTextureId == textureId ||
             _startingPictureInPictureTextureId == textureId) &&
         videoController != null) {
-      final stopFuture = _preparePictureInPictureHandoff(
+      await _preparePictureInPictureHandoff(
         textureId,
         videoController,
         wasStarting: _startingPictureInPictureTextureId == textureId,
       );
-      _pictureInPictureStopFuture = stopFuture;
-      await stopFuture;
     }
 
     await _players[textureId]?.dispose();
@@ -317,7 +315,8 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
           if (_startingPictureInPictureTextureId == textureId) {
             _startingPictureInPictureTextureId = null;
           }
-          debugPrint('Failed to enable picture in picture: $error\n$stackTrace');
+          debugPrint(
+              'Failed to enable picture in picture: $error\n$stackTrace');
           return -1;
         }
       case 'disable':
@@ -333,19 +332,23 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
   Future<void> _preparePictureInPictureHandoff(
       int textureId, VideoController controller,
       {required bool wasStarting}) async {
-    final active = await controller.isPictureInPictureActive();
     _activePictureInPictureTextureId = null;
     if (_startingPictureInPictureTextureId == textureId) {
       _startingPictureInPictureTextureId = null;
     }
-    if (!active && !wasStarting) {
+    // This must happen before the first await. The app intentionally does not
+    // await disposal before creating the replacement controller.
+    _pictureInPictureHandoffPending = _pictureInPictureEnabled;
+
+    final active = await controller.isPictureInPictureActive();
+    if (!active && !wasStarting && _pictureInPictureTextureId == textureId) {
       _pictureInPictureEnabled = false;
       _pictureInPictureHandoffPending = false;
       return;
     }
 
-    _pictureInPictureHandoffPending = _pictureInPictureEnabled;
-    await controller.stopPictureInPicture();
+    // iOS keeps one shared PiP controller alive and replaces the disposed
+    // output with a black sample-buffer frame until the next output is ready.
   }
 
   Future<void> _resumePictureInPicture(
@@ -353,7 +356,6 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
     VideoController controller,
   ) async {
     try {
-      await controller.waitUntilFirstFrameRendered;
       if (!_pictureInPictureEnabled ||
           !_pictureInPictureHandoffPending ||
           _pictureInPictureTextureId != textureId ||
@@ -362,6 +364,9 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
       }
 
       _startingPictureInPictureTextureId = textureId;
+      // Native queues this handoff until the first real pixel buffer arrives.
+      // waitUntilFirstFrameRendered only tracks a non-zero resize event, which
+      // can happen before VideoOutput has copied a frame for PiP.
       final started = await controller.startPictureInPicture(
         sourceRect: _pictureInPictureSourceRect,
       );

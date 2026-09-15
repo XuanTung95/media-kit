@@ -32,6 +32,7 @@ public class VideoOutput: NSObject {
   private let enableHardwareAcceleration: Bool
   private let registry: FlutterTextureRegistry
   private let textureUpdateCallback: TextureUpdateCallback
+  private let pictureInPicturePlaybackCallback: PictureInPicturePlaybackCallback
   private let worker: Worker = .init()
   private var width: Int64?
   private var height: Int64?
@@ -41,7 +42,9 @@ public class VideoOutput: NSObject {
   private var disposed: Bool = false
 
   #if os(iOS)
-    private var pictureInPicture: MediaKitPictureInPictureController?
+    private static let sharedPictureInPicture = MediaKitPictureInPictureController()
+    private let pictureInPicture = VideoOutput.sharedPictureInPicture
+    private let pictureInPictureHandle: Int64
   #endif
 
   init(
@@ -51,35 +54,22 @@ public class VideoOutput: NSObject {
     textureUpdateCallback: @escaping TextureUpdateCallback,
     pictureInPicturePlaybackCallback: @escaping PictureInPicturePlaybackCallback
   ) {
-    let handle = OpaquePointer(bitPattern: Int(handle))
-    assert(handle != nil, "handle casting")
+    let playerHandle = OpaquePointer(bitPattern: Int(handle))
+    assert(playerHandle != nil, "handle casting")
 
-    self.handle = handle!
+    self.handle = playerHandle!
     width = configuration.width
     height = configuration.height
     enableHardwareAcceleration = configuration.enableHardwareAcceleration
     self.registry = registry
     self.textureUpdateCallback = textureUpdateCallback
-
-    super.init()
+    self.pictureInPicturePlaybackCallback = pictureInPicturePlaybackCallback
 
     #if os(iOS)
-      pictureInPicture = MediaKitPictureInPictureController(
-        handle: self.handle,
-        activeChanged: { [weak self] active in
-          guard let self else { return }
-          if active {
-            (self.texture as? SafeResizableTexture)?.requestFlutterTextureOutputFreeze()
-          } else {
-            (self.texture as? SafeResizableTexture)?.resumeFlutterTextureOutput()
-            DispatchQueue.main.async {
-              self.registry.textureFrameAvailable(self.textureId)
-            }
-          }
-        },
-        playbackChanged: pictureInPicturePlaybackCallback
-      )
+      pictureInPictureHandle = handle
     #endif
+
+    super.init()
 
     worker.enqueue {
       self._init()
@@ -89,6 +79,9 @@ public class VideoOutput: NSObject {
   deinit {
     worker.cancel()
     if !disposed {
+      #if os(iOS)
+        pictureInPicture.detach(outputHandle: pictureInPictureHandle)
+      #endif
       texture?.dispose()
       disposeTextureId()
     }
@@ -102,6 +95,10 @@ public class VideoOutput: NSObject {
       return
     }
     disposed = true
+
+    #if os(iOS)
+      pictureInPicture.detach(outputHandle: pictureInPictureHandle)
+    #endif
 
     // Serialize behind any render already queued on the worker. New update
     // callbacks are ignored once `disposed` is true.
@@ -140,7 +137,7 @@ public class VideoOutput: NSObject {
         TextureHW(
           handle: handle,
           // Use `weak self` to prevent memory leaks
-          updateCallback: { [weak self]() in
+          updateCallback: { [weak self] () in
             guard let that = self else {
               return
             }
@@ -153,7 +150,7 @@ public class VideoOutput: NSObject {
         TextureSW(
           handle: handle,
           // Use `weak self` to prevent memory leaks
-          updateCallback: { [weak self]() in
+          updateCallback: { [weak self] () in
             guard let that = self else {
               return
             }
@@ -163,7 +160,7 @@ public class VideoOutput: NSObject {
       )
     }
 
-    DispatchQueue.main.sync { [weak self]() in
+    DispatchQueue.main.sync { [weak self] () in
       guard let that = self else {
         return
       }
@@ -235,7 +232,10 @@ public class VideoOutput: NSObject {
       if let frame = safeTexture?.copyPixelBufferForPictureInPicture()?
         .takeRetainedValue()
       {
-        pictureInPicture?.enqueue(frame)
+        pictureInPicture.enqueue(
+          outputHandle: pictureInPictureHandle,
+          pixelBuffer: frame
+        )
       }
       let didFreezeFlutterTexture =
         safeTexture?.freezeFlutterTextureOutputIfRequested() == true
@@ -261,11 +261,11 @@ public class VideoOutput: NSObject {
 
   #if os(iOS)
     public func isPictureInPictureSupported() -> Bool {
-      pictureInPicture?.isSupported ?? false
+      pictureInPicture.isSupported
     }
 
     public func isPictureInPictureActive() -> Bool {
-      pictureInPicture?.isActive ?? false
+      pictureInPicture.isActive
     }
 
     public func startPictureInPicture(
@@ -273,47 +273,60 @@ public class VideoOutput: NSObject {
       sourceRect: CGRect?,
       completion: @escaping (Bool, String?) -> Void
     ) {
-      guard let pictureInPicture else {
-        completion(false, "Picture in Picture is unavailable.")
-        return
-      }
       pictureInPicture.start(
+        outputHandle: pictureInPictureHandle,
+        playerHandle: handle,
         playing: playing,
         sourceRect: sourceRect,
+        activeChanged: { [weak self] active in
+          guard let self else { return }
+          if active {
+            (self.texture as? SafeResizableTexture)?.requestFlutterTextureOutputFreeze()
+          } else {
+            (self.texture as? SafeResizableTexture)?.resumeFlutterTextureOutput()
+            DispatchQueue.main.async {
+              self.registry.textureFrameAvailable(self.textureId)
+            }
+          }
+        },
+        playbackChanged: pictureInPicturePlaybackCallback,
         completion: completion
       )
     }
 
     public func stopPictureInPicture(completion: @escaping () -> Void) {
-      guard let pictureInPicture else {
-        completion()
-        return
-      }
       pictureInPicture.stop(completion: completion)
     }
 
     public func updatePictureInPicturePlaying(_ playing: Bool) {
-      pictureInPicture?.updatePlaying(playing)
+      pictureInPicture.updatePlaying(
+        outputHandle: pictureInPictureHandle,
+        playing: playing
+      )
     }
   #endif
 
-    private var videoSize: CGSize {
-        // fixed size
-        if width != nil && height != nil {
-            return CGSize(
-                width: Double(width!),
-                height: Double(height!)
-            )
-        }
-        
-        let params = MPVHelpers.getVideoOutParams(handle)
-        return CGSize(
-            width: Double(width ?? (params.rotate == 0 || params.rotate == 180
-                                    ? params.dw
-                                    : params.dh)),
-            height: Double(height ?? (params.rotate == 0 || params.rotate == 180
-                                      ? params.dh
-                                      : params.dw))
-        )
+  private var videoSize: CGSize {
+    // fixed size
+    if width != nil && height != nil {
+      return CGSize(
+        width: Double(width!),
+        height: Double(height!)
+      )
+    }
+
+    let params = MPVHelpers.getVideoOutParams(handle)
+    return CGSize(
+      width: Double(
+        width
+          ?? (params.rotate == 0 || params.rotate == 180
+            ? params.dw
+            : params.dh)),
+      height: Double(
+        height
+          ?? (params.rotate == 0 || params.rotate == 180
+            ? params.dh
+            : params.dw))
+    )
   }
 }

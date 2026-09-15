@@ -8,23 +8,40 @@ import UIKit
 
 /// Availability-safe wrapper because media_kit_video still supports pre-iOS 15.
 final class MediaKitPictureInPictureController {
-  private let handle: OpaquePointer
-  private let activeChanged: (Bool) -> Void
-  private let playbackChanged: (Bool) -> Void
+  private final class PendingStart {
+    let outputHandle: Int64
+    let playerHandle: OpaquePointer
+    let playing: Bool
+    let sourceRect: CGRect?
+    let activeChanged: (Bool) -> Void
+    let playbackChanged: (Bool) -> Void
+    let completion: (Bool, String?) -> Void
+
+    init(
+      outputHandle: Int64,
+      playerHandle: OpaquePointer,
+      playing: Bool,
+      sourceRect: CGRect?,
+      activeChanged: @escaping (Bool) -> Void,
+      playbackChanged: @escaping (Bool) -> Void,
+      completion: @escaping (Bool, String?) -> Void
+    ) {
+      self.outputHandle = outputHandle
+      self.playerHandle = playerHandle
+      self.playing = playing
+      self.sourceRect = sourceRect
+      self.activeChanged = activeChanged
+      self.playbackChanged = playbackChanged
+      self.completion = completion
+    }
+  }
+
   private let frameLock = NSLock()
   private var implementation: AnyObject?
-  private var latestFrame: CVPixelBuffer?
+  private var latestFrames: [Int64: CVPixelBuffer] = [:]
+  private var selectedHandle: Int64?
+  private var pendingStart: PendingStart?
   private var preparingImplementation = false
-
-  init(
-    handle: OpaquePointer,
-    activeChanged: @escaping (Bool) -> Void,
-    playbackChanged: @escaping (Bool) -> Void
-  ) {
-    self.handle = handle
-    self.activeChanged = activeChanged
-    self.playbackChanged = playbackChanged
-  }
 
   deinit {
     frameLock.lock()
@@ -51,8 +68,12 @@ final class MediaKitPictureInPictureController {
   }
 
   func start(
+    outputHandle: Int64,
+    playerHandle: OpaquePointer,
     playing: Bool,
     sourceRect: CGRect?,
+    activeChanged: @escaping (Bool) -> Void,
+    playbackChanged: @escaping (Bool) -> Void,
     completion: @escaping (Bool, String?) -> Void
   ) {
     guard isSupported else {
@@ -61,28 +82,51 @@ final class MediaKitPictureInPictureController {
     }
 
     if #available(iOS 15.0, *) {
-      frameLock.lock()
-      let initialFrame = latestFrame
-      let existingImplementation = implementation
-      frameLock.unlock()
-      guard let initialFrame else {
-        completion(false, "Video is not ready for Picture in Picture.")
-        return
-      }
-      guard
-        let implementation = existingImplementation
-          as? MediaKitPictureInPictureImplementation
-      else {
-        completion(false, "Picture in Picture is not ready.")
-        return
-      }
-      implementation.start(
-        initialFrame: initialFrame,
+      let request = PendingStart(
+        outputHandle: outputHandle,
+        playerHandle: playerHandle,
         playing: playing,
         sourceRect: sourceRect,
+        activeChanged: activeChanged,
+        playbackChanged: playbackChanged,
         completion: completion
       )
+      frameLock.lock()
+      let initialFrame = latestFrames[outputHandle]
+      let existingImplementation = implementation
+      if initialFrame == nil || existingImplementation == nil {
+        let previousRequest = pendingStart
+        pendingStart = request
+        frameLock.unlock()
+        previousRequest?.completion(false, "Picture in Picture start was superseded.")
+        return
+      }
+      selectedHandle = outputHandle
+      frameLock.unlock()
+      performStart(
+        request,
+        initialFrame: initialFrame!,
+        implementation: existingImplementation
+          as! MediaKitPictureInPictureImplementation
+      )
     }
+  }
+
+  @available(iOS 15.0, *)
+  private func performStart(
+    _ request: PendingStart,
+    initialFrame: CVPixelBuffer,
+    implementation: MediaKitPictureInPictureImplementation
+  ) {
+    implementation.start(
+      playerHandle: request.playerHandle,
+      initialFrame: initialFrame,
+      playing: request.playing,
+      sourceRect: request.sourceRect,
+      activeChanged: request.activeChanged,
+      playbackChanged: request.playbackChanged,
+      completion: request.completion
+    )
   }
 
   func stop(completion: @escaping () -> Void) {
@@ -98,7 +142,12 @@ final class MediaKitPictureInPictureController {
     implementation.stop(completion: completion)
   }
 
-  func updatePlaying(_ playing: Bool) {
+  func updatePlaying(outputHandle: Int64, playing: Bool) {
+    frameLock.lock()
+    let isSelected = selectedHandle == outputHandle
+    frameLock.unlock()
+    guard isSelected else { return }
+
     frameLock.lock()
     let implementation = implementation
     frameLock.unlock()
@@ -108,10 +157,19 @@ final class MediaKitPictureInPictureController {
     implementation.updatePlaying(playing)
   }
 
-  func enqueue(_ pixelBuffer: CVPixelBuffer) {
+  func enqueue(outputHandle: Int64, pixelBuffer: CVPixelBuffer) {
     frameLock.lock()
-    latestFrame = pixelBuffer
+    latestFrames[outputHandle] = pixelBuffer
     let implementation = implementation
+    let isSelected = selectedHandle == outputHandle
+    let startRequest =
+      pendingStart?.outputHandle == outputHandle
+      ? pendingStart
+      : nil
+    if startRequest != nil, implementation != nil {
+      pendingStart = nil
+      selectedHandle = outputHandle
+    }
     let shouldPrepare = implementation == nil && !preparingImplementation
     if shouldPrepare {
       preparingImplementation = true
@@ -120,7 +178,16 @@ final class MediaKitPictureInPictureController {
 
     guard #available(iOS 15.0, *), isSupported else { return }
     if let implementation = implementation as? MediaKitPictureInPictureImplementation {
-      implementation.enqueue(pixelBuffer)
+      if isSelected {
+        implementation.enqueue(pixelBuffer)
+      }
+      if let startRequest {
+        performStart(
+          startRequest,
+          initialFrame: pixelBuffer,
+          implementation: implementation
+        )
+      }
       return
     }
     guard shouldPrepare else { return }
@@ -133,25 +200,58 @@ final class MediaKitPictureInPictureController {
 
       let implementation =
         existingImplementation as? MediaKitPictureInPictureImplementation
-        ?? MediaKitPictureInPictureImplementation(
-          handle: self.handle,
-          activeChanged: self.activeChanged,
-          playbackChanged: self.playbackChanged
-        )
+        ?? MediaKitPictureInPictureImplementation()
       self.frameLock.lock()
       self.implementation = implementation
       self.preparingImplementation = false
+      let startRequest = self.pendingStart
+      let startFrame = startRequest.flatMap {
+        self.latestFrames[$0.outputHandle]
+      }
+      if startRequest != nil, startFrame != nil {
+        self.pendingStart = nil
+        self.selectedHandle = startRequest?.outputHandle
+      }
       self.frameLock.unlock()
       implementation.prewarm(pixelBuffer)
+      if let startRequest, let startFrame {
+        self.performStart(
+          startRequest,
+          initialFrame: startFrame,
+          implementation: implementation
+        )
+      }
     }
+  }
+
+  func detach(outputHandle: Int64) {
+    frameLock.lock()
+    latestFrames[outputHandle] = nil
+    let implementation = implementation
+    let isSelected = selectedHandle == outputHandle
+    let cancelledStart =
+      pendingStart?.outputHandle == outputHandle
+      ? pendingStart
+      : nil
+    if cancelledStart != nil {
+      pendingStart = nil
+    }
+    if isSelected {
+      selectedHandle = nil
+    }
+    frameLock.unlock()
+
+    cancelledStart?.completion(false, "Video output was disposed before its first frame.")
+
+    guard isSelected, #available(iOS 15.0, *),
+      let implementation = implementation as? MediaKitPictureInPictureImplementation
+    else { return }
+    implementation.showPlaceholder()
   }
 }
 
 @available(iOS 15.0, *)
 private final class MediaKitPictureInPictureImplementation: NSObject {
-  private let handle: OpaquePointer
-  private let activeChanged: (Bool) -> Void
-  private let playbackChanged: (Bool) -> Void
   private let displayLayer = AVSampleBufferDisplayLayer()
   private let frameLock = NSLock()
 
@@ -159,19 +259,11 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
   private var controller: AVPictureInPictureController?
   private var prepared = false
   private var pictureInPictureActive = false
+  private var playerHandle: OpaquePointer?
+  private var activeChanged: ((Bool) -> Void)?
+  private var playbackChanged: ((Bool) -> Void)?
   private var startCompletion: ((Bool, String?) -> Void)?
   private var stopCompletions: [() -> Void] = []
-
-  init(
-    handle: OpaquePointer,
-    activeChanged: @escaping (Bool) -> Void,
-    playbackChanged: @escaping (Bool) -> Void
-  ) {
-    self.handle = handle
-    self.activeChanged = activeChanged
-    self.playbackChanged = playbackChanged
-    super.init()
-  }
 
   deinit {
     let controller = controller
@@ -203,9 +295,12 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
   }
 
   func start(
+    playerHandle: OpaquePointer,
     initialFrame: CVPixelBuffer,
     playing: Bool,
     sourceRect: CGRect?,
+    activeChanged: @escaping (Bool) -> Void,
+    playbackChanged: @escaping (Bool) -> Void,
     completion: @escaping (Bool, String?) -> Void
   ) {
     let action = {
@@ -213,6 +308,11 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
         completion(false, "Picture in Picture is already starting.")
         return
       }
+      self.attach(
+        playerHandle: playerHandle,
+        activeChanged: activeChanged,
+        playbackChanged: playbackChanged
+      )
       self.prepareIfNeeded()
       self.updateSourceRect(sourceRect)
       guard let controller = self.controller else {
@@ -225,7 +325,9 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
       controller.invalidatePlaybackState()
       if controller.isPictureInPictureActive {
         self.setPictureInPictureActive(true)
-        self.activeChanged(true)
+        self.displayLayer.flush()
+        _ = self.enqueueSample(initialFrame)
+        self.activeChanged?(true)
         completion(true, nil)
         return
       }
@@ -236,7 +338,7 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
         return
       }
       // Freeze Flutter before system PiP starts; delegates can be delayed on reuse.
-      self.activeChanged(true)
+      self.activeChanged?(true)
       controller.startPictureInPicture()
     }
     if Thread.isMainThread {
@@ -277,6 +379,36 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
     } else {
       DispatchQueue.main.async(execute: action)
     }
+  }
+
+  func showPlaceholder() {
+    let action = {
+      self.activeChanged?(false)
+      self.activeChanged = nil
+      self.playbackChanged = nil
+      self.playerHandle = nil
+      if let placeholder = self.makeBlackPixelBuffer() {
+        self.displayLayer.flush()
+        _ = self.enqueueSample(placeholder)
+      }
+      self.controller?.invalidatePlaybackState()
+    }
+    if Thread.isMainThread {
+      action()
+    } else {
+      DispatchQueue.main.async(execute: action)
+    }
+  }
+
+  private func attach(
+    playerHandle: OpaquePointer,
+    activeChanged: @escaping (Bool) -> Void,
+    playbackChanged: @escaping (Bool) -> Void
+  ) {
+    self.activeChanged?(false)
+    self.playerHandle = playerHandle
+    self.activeChanged = activeChanged
+    self.playbackChanged = playbackChanged
   }
 
   private func finishStop() {
@@ -410,11 +542,13 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
 
   private func makeSampleBuffer(_ pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
     var format: CMVideoFormatDescription?
-    guard CMVideoFormatDescriptionCreateForImageBuffer(
-      allocator: kCFAllocatorDefault,
-      imageBuffer: pixelBuffer,
-      formatDescriptionOut: &format
-    ) == noErr, let format else { return nil }
+    guard
+      CMVideoFormatDescriptionCreateForImageBuffer(
+        allocator: kCFAllocatorDefault,
+        imageBuffer: pixelBuffer,
+        formatDescriptionOut: &format
+      ) == noErr, let format
+    else { return nil }
 
     var timing = CMSampleTimingInfo(
       duration: .invalid,
@@ -422,16 +556,18 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
       decodeTimeStamp: .invalid
     )
     var sampleBuffer: CMSampleBuffer?
-    guard CMSampleBufferCreateForImageBuffer(
-      allocator: kCFAllocatorDefault,
-      imageBuffer: pixelBuffer,
-      dataReady: true,
-      makeDataReadyCallback: nil,
-      refcon: nil,
-      formatDescription: format,
-      sampleTiming: &timing,
-      sampleBufferOut: &sampleBuffer
-    ) == noErr, let sampleBuffer else { return nil }
+    guard
+      CMSampleBufferCreateForImageBuffer(
+        allocator: kCFAllocatorDefault,
+        imageBuffer: pixelBuffer,
+        dataReady: true,
+        makeDataReadyCallback: nil,
+        refcon: nil,
+        formatDescription: format,
+        sampleTiming: &timing,
+        sampleBufferOut: &sampleBuffer
+      ) == noErr, let sampleBuffer
+    else { return nil }
 
     if let attachments = CMSampleBufferGetSampleAttachmentsArray(
       sampleBuffer,
@@ -442,26 +578,61 @@ private final class MediaKitPictureInPictureImplementation: NSObject {
     return sampleBuffer
   }
 
+  private func makeBlackPixelBuffer() -> CVPixelBuffer? {
+    var pixelBuffer: CVPixelBuffer?
+    let attributes: [CFString: Any] = [
+      kCVPixelBufferCGImageCompatibilityKey: true,
+      kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+      kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+    ]
+    guard
+      CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        16,
+        9,
+        kCVPixelFormatType_32BGRA,
+        attributes as CFDictionary,
+        &pixelBuffer
+      ) == kCVReturnSuccess, let pixelBuffer
+    else { return nil }
+
+    CVPixelBufferLockBaseAddress(pixelBuffer, [])
+    if let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) {
+      let dataSize = CVPixelBufferGetDataSize(pixelBuffer)
+      memset(baseAddress, 0, dataSize)
+      let bytes = baseAddress.assumingMemoryBound(to: UInt8.self)
+      for alphaOffset in stride(from: 3, to: dataSize, by: 4) {
+        bytes[alphaOffset] = 255
+      }
+    }
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+    return pixelBuffer
+  }
+
   private func doubleProperty(_ name: String) -> Double {
+    guard let playerHandle else { return 0 }
     var value = 0.0
-    mpv_get_property(handle, name, MPV_FORMAT_DOUBLE, &value)
+    mpv_get_property(playerHandle, name, MPV_FORMAT_DOUBLE, &value)
     return value.isFinite ? value : 0
   }
 
   private func boolProperty(_ name: String) -> Bool {
+    guard let playerHandle else { return true }
     var value: Int32 = 0
-    mpv_get_property(handle, name, MPV_FORMAT_FLAG, &value)
+    mpv_get_property(playerHandle, name, MPV_FORMAT_FLAG, &value)
     return value != 0
   }
 
   private func setBoolProperty(_ name: String, _ value: Bool) {
+    guard let playerHandle else { return }
     var flag: Int32 = value ? 1 : 0
-    mpv_set_property(handle, name, MPV_FORMAT_FLAG, &flag)
+    mpv_set_property(playerHandle, name, MPV_FORMAT_FLAG, &flag)
   }
 
   private func setDoubleProperty(_ name: String, _ value: Double) {
+    guard let playerHandle else { return }
     var value = value
-    mpv_set_property_async(handle, 0, name, MPV_FORMAT_DOUBLE, &value)
+    mpv_set_property_async(playerHandle, 0, name, MPV_FORMAT_DOUBLE, &value)
   }
 }
 
@@ -475,7 +646,7 @@ extension MediaKitPictureInPictureImplementation:
   ) {
     // Apply immediately for AVKit, then notify Dart so PlayerState stays in sync.
     setBoolProperty("pause", !playing)
-    playbackChanged(playing)
+    playbackChanged?(playing)
     pictureInPictureController.invalidatePlaybackState()
   }
 
@@ -520,7 +691,7 @@ extension MediaKitPictureInPictureImplementation: AVPictureInPictureControllerDe
     _ pictureInPictureController: AVPictureInPictureController
   ) {
     setPictureInPictureActive(true)
-    activeChanged(true)
+    activeChanged?(true)
     finishStart(true, nil)
     if !stopCompletions.isEmpty {
       pictureInPictureController.stopPictureInPicture()
@@ -531,7 +702,7 @@ extension MediaKitPictureInPictureImplementation: AVPictureInPictureControllerDe
     _ pictureInPictureController: AVPictureInPictureController,
     failedToStartPictureInPictureWithError error: Error
   ) {
-    activeChanged(false)
+    activeChanged?(false)
     finishStart(false, error.localizedDescription)
     finishStop()
   }
@@ -540,14 +711,15 @@ extension MediaKitPictureInPictureImplementation: AVPictureInPictureControllerDe
     _ pictureInPictureController: AVPictureInPictureController
   ) {
     setPictureInPictureActive(false)
-    activeChanged(false)
+    activeChanged?(false)
     resetSourceView()
     finishStop()
   }
 
   func pictureInPictureController(
     _ pictureInPictureController: AVPictureInPictureController,
-    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler:
+      @escaping (Bool) -> Void
   ) {
     completionHandler(true)
   }
