@@ -597,8 +597,11 @@ class MediaKitVideoPlayer extends VideoPlayerPlatform {
 
       streamSubscriptions.add(
         player.stream.error.listen(
-          (event) async {
-            await completer.future;
+          (event) {
+            // A terminal load failure can occur before width, height or
+            // duration are known. Forward it immediately so
+            // VideoPlayerController.initialize completes with an error instead
+            // of waiting forever for the initialized event.
             streamController.addError(
               PlatformException(
                 code: '',
