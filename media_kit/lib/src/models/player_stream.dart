@@ -96,7 +96,8 @@ class PlayerStream {
   /// [Stream] emitting internal logs.
   final Stream<PlayerLog> log;
 
-  /// [Stream] emitting error messages. This may be used to handle & display errors to the user.
+  /// [Stream] emitting terminal playback error messages. Recoverable decoder
+  /// and network diagnostics are emitted through [log] instead.
   final Stream<String> error;
 
   /// {@macro player_stream}

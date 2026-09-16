@@ -30,6 +30,7 @@ import 'package:media_kit/src/models/video_params.dart';
 import 'package:media_kit/src/player/native/core/fallback_bitrate_handler.dart';
 import 'package:media_kit/src/player/native/core/initializer.dart';
 import 'package:media_kit/src/player/native/core/native_library.dart';
+import 'package:media_kit/src/player/native/core/playback_error.dart';
 import 'package:media_kit/src/player/native/utils/android_asset_loader.dart';
 import 'package:media_kit/src/player/native/utils/android_helper.dart';
 import 'package:media_kit/src/player/native/utils/isolates.dart';
@@ -1555,6 +1556,8 @@ class NativePlayer extends PlatformPlayer {
     );
 
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_START_FILE) {
+      _terminalErrorEmitted = false;
+      _lastPlaybackError = null;
       if (isPlayingStateChangeAllowed) {
         state = state.copyWith(
           playing: true,
@@ -1570,6 +1573,22 @@ class NativePlayer extends PlatformPlayer {
       state = state.copyWith(buffering: true);
       if (!bufferingController.isClosed) {
         bufferingController.add(true);
+      }
+    }
+    if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_END_FILE) {
+      final data = event.ref.data.cast<generated.mpv_event_end_file>().ref;
+      if (data.reason ==
+          generated.mpv_end_file_reason.MPV_END_FILE_REASON_ERROR) {
+        final message = data.error < 0
+            ? mpv.mpv_error_string(data.error).cast<Utf8>().toDartString()
+            : 'Unknown playback error';
+        _emitTerminalPlaybackError(
+          _lastPlaybackError ?? 'Playback failed: $message',
+        );
+      } else if (data.reason ==
+              generated.mpv_end_file_reason.MPV_END_FILE_REASON_EOF &&
+          _isPrematureNetworkEof()) {
+        _emitTerminalPlaybackError(_prematureEofMessage());
       }
     }
     if (event.ref.event_id ==
@@ -2034,17 +2053,22 @@ class NativePlayer extends PlatformPlayer {
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
         final value = prop.ref.data.cast<Bool>().value;
         if (value) {
+          final prematureNetworkEof = _isPrematureNetworkEof();
           if (isPlayingStateChangeAllowed) {
             state = state.copyWith(
               playing: false,
-              completed: true,
+              completed: !prematureNetworkEof,
             );
             if (!playingController.isClosed) {
               playingController.add(false);
             }
-            if (!completedController.isClosed) {
+            if (!prematureNetworkEof && !completedController.isClosed) {
               completedController.add(true);
             }
+          }
+
+          if (prematureNetworkEof) {
+            _emitTerminalPlaybackError(_prematureEofMessage());
           }
 
           state = state.copyWith(
@@ -2153,45 +2177,23 @@ class NativePlayer extends PlatformPlayer {
             text: text,
           ),
         );
-        // --------------------------------------------------
-        // Emit error(s) based on the log messages.
+        // A log entry describes one decoder or transport operation, not the
+        // playback lifecycle. FFmpeg can log an error while libmpv keeps
+        // playing buffered media and retries the request. Retain the latest
+        // useful diagnostic for a later terminal event instead of reporting a
+        // fatal Player.stream.error immediately.
         if (level == 'error') {
-          if (prefix == 'file') {
-            // file:// not found.
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
-          if (prefix == 'ffmpeg') {
-            if (text.startsWith('tcp:')) {
-              // http:// error of any kind.
-              if (!errorController.isClosed) {
-                errorController.add(text);
-              }
-            }
-          }
-          if (prefix == 'vd') {
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
-          if (prefix == 'ad') {
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
-          if (prefix == 'cplayer') {
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
-          if (prefix == 'stream') {
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
+          if (<String>{
+            'file',
+            'ffmpeg',
+            'vd',
+            'ad',
+            'cplayer',
+            'stream',
+          }.contains(prefix)) {
+            _lastPlaybackError = '$prefix: $text';
           }
         }
-        // --------------------------------------------------
       }
     }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_HOOK) {
@@ -2594,7 +2596,7 @@ class NativePlayer extends PlatformPlayer {
     });
   }
 
-  /// Adds an error to the [Player.stream.error].
+  /// Adds an internal libmpv API failure to the diagnostic log stream.
   void _logError(int code, String? text) {
     if (code < 0 && !logController.isClosed) {
       final message = mpv.mpv_error_string(code).cast<Utf8>().toDartString();
@@ -2606,6 +2608,45 @@ class NativePlayer extends PlatformPlayer {
         ),
       );
     }
+  }
+
+  bool _isPrematureNetworkEof() {
+    final index = state.playlist.index;
+    if (index < 0 || index >= state.playlist.medias.length) {
+      return false;
+    }
+    final media = state.playlist.medias[index];
+    return isPrematureNetworkEof(
+      uri: media.uri,
+      position: state.position,
+      duration: state.duration,
+      requestedEnd: media.end,
+    );
+  }
+
+  String _prematureEofMessage() {
+    return _lastPlaybackError ??
+        'Network media ended before its advertised duration '
+            '(position: ${state.position}, duration: ${state.duration})';
+  }
+
+  void _emitTerminalPlaybackError(String message) {
+    if (_terminalErrorEmitted || errorController.isClosed) {
+      return;
+    }
+    _terminalErrorEmitted = true;
+    state = state.copyWith(
+      playing: false,
+      completed: false,
+      buffering: false,
+    );
+    if (!playingController.isClosed) {
+      playingController.add(false);
+    }
+    if (!bufferingController.isClosed) {
+      bufferingController.add(false);
+    }
+    errorController.add(message);
   }
 
   int _asyncRequestNumber = 0;
@@ -2739,6 +2780,14 @@ class NativePlayer extends PlatformPlayer {
 
   /// Whether the [Player] has been disposed. This is used to prevent accessing dangling [ctx] after [dispose].
   bool disposed = false;
+
+  /// Most recent playback-related mpv/FFmpeg diagnostic. It is retained so a
+  /// later terminal lifecycle event can include the useful low-level cause.
+  String? _lastPlaybackError;
+
+  /// Prevents eof-reached and MPV_EVENT_END_FILE from reporting the same
+  /// terminal failure twice.
+  bool _terminalErrorEmitted = false;
 
   /// A flag to keep track of [setShuffle] calls.
   bool isShuffleEnabled = false;
